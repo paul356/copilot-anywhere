@@ -7,6 +7,7 @@ import { ensureWikiStructure } from "../wiki/fs.js";
 import { listSkills } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
+import { handleWorkspace } from "../commands.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFile, unlink } from "fs/promises";
@@ -117,6 +118,7 @@ export function createBot(): Bot {
         "/skills — List installed skills\n" +
         "/agents — List available agents\n" +
         "/workers — Alias for /agents\n" +
+        "/ws — Manage workspaces (directories)\n" +
         "/restart — Restart Max\n" +
         "/help — Show this help"
     )
@@ -223,6 +225,12 @@ export function createBot(): Bot {
       ? "⚡ Auto mode on"
       : `Auto mode off · using ${config.copilotModel}`;
     await ctx.reply(label);
+  });
+  bot.command("ws", async (ctx) => {
+    const arg = ctx.match?.trim();
+    const channelKey = `telegram:${ctx.chat.id}`;
+    const reply = await handleWorkspace(arg, channelKey);
+    await safeReply(ctx, reply);
   });
 
   // Handle all text messages

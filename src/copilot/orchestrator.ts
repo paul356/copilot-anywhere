@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "async_hooks";
 import { approveAll, type CopilotClient, type CopilotSession } from "@github/copilot-sdk";
 import { createTools, type ToolDeps } from "./tools.js";
 import { getOrchestratorSystemMessage } from "./system-message.js";
@@ -5,15 +6,19 @@ import { config, DEFAULT_MODEL } from "../config.js";
 import { loadMcpConfig } from "./mcp-config.js";
 import { getSkillDirectories } from "./skills.js";
 import { resetClient } from "./client.js";
-import { logConversation, getState, setState, deleteState } from "../store/db.js";
+import {
+  logConversation, getState, setState, deleteState,
+  getWorkspace, getActiveWorkspace,
+  saveWorkspaceSessionId, clearWorkspaceSessionId,
+} from "../store/db.js";
 import { getWikiSummary } from "../wiki/context.js";
 import { SESSIONS_DIR } from "../paths.js";
 import { resolveModel, type Tier, type RouteResult } from "./router.js";
 import {
   loadAgents, ensureDefaultAgents,
-  clearActiveTasks, getAgentRegistry, getActiveAgent,
+  clearActiveTasks, getAgentRegistry,
   setActiveAgent, parseAtMention, buildAgentRoster,
-  getActiveTasks, completeTask, failTask,
+  getActiveTasks,
 } from "./agents.js";
 
 
@@ -27,7 +32,8 @@ const MAX_RETRIES = 3;
 const RECONNECT_DELAYS_MS = [1_000, 3_000, 10_000];
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 
-const ORCHESTRATOR_SESSION_KEY = "orchestrator_session_id";
+// Legacy DB key — migrated to "session:default" on first run after upgrade
+const LEGACY_SESSION_KEY = "orchestrator_session_id";
 
 export type SourceChannel = "telegram" | "tui" | "feishu";
 
@@ -39,6 +45,63 @@ export type MessageSource =
 
 export type MessageCallback = (text: string, done: boolean) => void;
 
+// ---------------------------------------------------------------------------
+// Async context — tracks per-request source info across async tool call chains
+// ---------------------------------------------------------------------------
+type RequestContext = { sourceKey: string | undefined; sourceChannel: SourceChannel | undefined };
+const requestContext = new AsyncLocalStorage<RequestContext>();
+
+export function getCurrentSourceKey(): string | undefined {
+  return requestContext.getStore()?.sourceKey;
+}
+
+export function getCurrentSourceChannel(): SourceChannel | undefined {
+  return requestContext.getStore()?.sourceChannel;
+}
+
+// ---------------------------------------------------------------------------
+// Per-workspace state
+// ---------------------------------------------------------------------------
+type QueuedMessage = {
+  prompt: string;
+  attachments?: Array<{ type: "file"; path: string; displayName?: string }>;
+  callback: MessageCallback;
+  sourceChannel?: SourceChannel;
+  /** Target agent slug for @mention routing. If undefined, goes to orchestrator. */
+  targetAgent?: string;
+  /** Conversation channel key for sticky routing, e.g. "telegram:123" or "tui:conn-1". */
+  channelKey?: string;
+  resolve: (value: string) => void;
+  reject: (err: unknown) => void;
+};
+
+type WorkspaceState = {
+  session?: CopilotSession;
+  createPromise?: Promise<CopilotSession>;
+  queue: QueuedMessage[];
+  processing: boolean;
+  currentModel?: string;
+  recentTiers: Tier[];
+  lastRouteResult?: RouteResult;
+  currentCallback?: MessageCallback;
+  /** The channelKey currently being executed — used for targeted cancel/abort. */
+  currentSourceKey?: string;
+};
+
+const workspacePool = new Map<string, WorkspaceState>();
+
+function getOrCreateWorkspace(name: string): WorkspaceState {
+  let ws = workspacePool.get(name);
+  if (!ws) {
+    ws = { queue: [], processing: false, recentTiers: [] };
+    workspacePool.set(name, ws);
+  }
+  return ws;
+}
+
+// ---------------------------------------------------------------------------
+// Logging / notification callbacks
+// ---------------------------------------------------------------------------
 type LogFn = (direction: "in" | "out", source: string, text: string) => void;
 let logMessage: LogFn = () => {};
 
@@ -57,48 +120,11 @@ export function setProactiveNotify(fn: ProactiveNotifyFn): void {
 let copilotClient: CopilotClient | undefined;
 let healthCheckTimer: ReturnType<typeof setInterval> | undefined;
 
-// Router state — tracks model across the session
-let currentSessionModel: string | undefined;
-let recentTiers: Tier[] = [];
+// Global "last route result" — updated by any workspace, used for model indicator display
 let lastRouteResult: RouteResult | undefined;
 
 export function getLastRouteResult(): RouteResult | undefined {
   return lastRouteResult;
-}
-
-// Persistent orchestrator session
-let orchestratorSession: CopilotSession | undefined;
-// Coalesces concurrent ensureOrchestratorSession calls
-let sessionCreatePromise: Promise<CopilotSession> | undefined;
-
-// Message queue — serializes access to the single persistent session
-type QueuedMessage = {
-  prompt: string;
-  attachments?: Array<{ type: "file"; path: string; displayName?: string }>;
-  callback: MessageCallback;
-  sourceChannel?: SourceChannel;
-  /** Target agent slug for @mention routing. If undefined, goes to orchestrator. */
-  targetAgent?: string;
-  /** Conversation channel key for sticky routing, e.g. "telegram:123" or "tui:conn-1". */
-  channelKey?: string;
-  resolve: (value: string) => void;
-  reject: (err: unknown) => void;
-};
-const messageQueue: QueuedMessage[] = [];
-let processing = false;
-let currentCallback: MessageCallback | undefined;
-/** The channel currently being processed — tools use this to tag new workers. */
-let currentSourceChannel: SourceChannel | undefined;
-/** The exact source currently being processed — used for scoped cancel/result delivery. */
-let currentSourceKey: string | undefined;
-
-/** Get the channel that originated the message currently being processed. */
-export function getCurrentSourceChannel(): SourceChannel | undefined {
-  return currentSourceChannel;
-}
-
-export function getCurrentSourceKey(): string | undefined {
-  return currentSourceKey;
 }
 
 function getSourceKey(source: MessageSource): string | undefined {
@@ -141,6 +167,17 @@ export function feedAgentResult(taskId: string, agentSlug: string, result: strin
   );
 }
 
+/**
+ * Return the working directory configured for the active workspace of a channel.
+ * Returns undefined for the "default" workspace (uses daemon cwd).
+ */
+export function getWorkingDirForSourceKey(channelKey: string | undefined): string | undefined {
+  if (!channelKey) return undefined;
+  const wsName = getActiveWorkspace(channelKey);
+  if (wsName === "default") return undefined;
+  return getWorkspace(wsName)?.working_dir;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -172,9 +209,11 @@ function startHealthCheck(): void {
       if (state !== "connected") {
         console.log(`[max] Health check: client state is '${state}', resetting…`);
         await ensureClient();
-        // Session may need recovery after client reset
-        orchestratorSession = undefined;
-        currentSessionModel = undefined;
+        // Clear all workspace sessions — they'll be recreated on next use
+        for (const ws of workspacePool.values()) {
+          ws.session = undefined;
+          ws.currentModel = undefined;
+        }
       }
     } catch (err) {
       console.error(`[max] Health check error:`, err instanceof Error ? err.message : err);
@@ -182,27 +221,16 @@ function startHealthCheck(): void {
   }, HEALTH_CHECK_INTERVAL_MS);
 }
 
-/** Create or resume the persistent orchestrator session. */
-async function ensureOrchestratorSession(): Promise<CopilotSession> {
-  if (orchestratorSession) return orchestratorSession;
-  // Coalesce concurrent callers — wait for an in-flight creation
-  if (sessionCreatePromise) return sessionCreatePromise;
-
-  sessionCreatePromise = createOrResumeSession();
-  try {
-    const session = await sessionCreatePromise;
-    orchestratorSession = session;
-    return session;
-  } finally {
-    sessionCreatePromise = undefined;
-  }
+function sessionDbKey(wsName: string): string {
+  return `session:${wsName}`;
 }
 
-/** Internal: actually create or resume a session (not concurrency-safe — use ensureOrchestratorSession). */
-async function createOrResumeSession(): Promise<CopilotSession> {
+/** Internal: create or resume a workspace session (not concurrency-safe — use ensureWorkspaceSession). */
+async function createOrResumeWorkspaceSession(wsName: string, workingDir?: string): Promise<CopilotSession> {
   const client = await ensureClient();
   const { tools, mcpServers, skillDirectories } = getSessionConfig();
   const memorySummary = getWikiSummary();
+  const ws = getOrCreateWorkspace(wsName);
 
   const infiniteSessions = {
     enabled: true,
@@ -210,43 +238,11 @@ async function createOrResumeSession(): Promise<CopilotSession> {
     bufferExhaustionThreshold: 0.95,
   };
 
-  // Try to resume a previous session
-  const savedSessionId = getState(ORCHESTRATOR_SESSION_KEY);
-  if (savedSessionId) {
-    try {
-      console.log(`[max] Resuming orchestrator session ${savedSessionId.slice(0, 8)}…`);
-      const session = await client.resumeSession(savedSessionId, {
-        model: config.copilotModel,
-        configDir: SESSIONS_DIR,
-        streaming: true,
-        systemMessage: {
-          content: getOrchestratorSystemMessage({
-            selfEditEnabled: config.selfEditEnabled,
-            memorySummary: memorySummary || undefined,
-            agentRoster: buildAgentRoster(),
-          }),
-        },
-        tools,
-        mcpServers,
-        skillDirectories,
-        onPermissionRequest: orchestratorPermissionHandler,
-        infiniteSessions,
-      });
-      console.log(`[max] Resumed orchestrator session successfully`);
-      currentSessionModel = config.copilotModel;
-      return session;
-    } catch (err) {
-      console.log(`[max] Could not resume session: ${err instanceof Error ? err.message : err}. Creating new.`);
-      deleteState(ORCHESTRATOR_SESSION_KEY);
-    }
-  }
-
-  // Create a fresh session
-  console.log(`[max] Creating new persistent orchestrator session`);
-  const session = await client.createSession({
-    model: config.copilotModel,
+  const sessionParams = {
+    model: ws.currentModel || config.copilotModel,
     configDir: SESSIONS_DIR,
     streaming: true,
+    ...(workingDir ? { workingDirectory: workingDir } : {}),
     systemMessage: {
       content: getOrchestratorSystemMessage({
         selfEditEnabled: config.selfEditEnabled,
@@ -259,14 +255,67 @@ async function createOrResumeSession(): Promise<CopilotSession> {
     skillDirectories,
     onPermissionRequest: orchestratorPermissionHandler,
     infiniteSessions,
-  });
+  };
 
-  // Persist the session ID for future restarts
-  setState(ORCHESTRATOR_SESSION_KEY, session.sessionId);
-  console.log(`[max] Created orchestrator session ${session.sessionId.slice(0, 8)}…`);
+  // Resolve saved session ID: new key first, then legacy key (default workspace only)
+  const dbKey = sessionDbKey(wsName);
+  let savedSessionId = getState(dbKey);
 
-  currentSessionModel = config.copilotModel;
+  if (!savedSessionId && wsName === "default") {
+    const legacyId = getState(LEGACY_SESSION_KEY);
+    if (legacyId) {
+      savedSessionId = legacyId;
+      setState(dbKey, legacyId);
+      deleteState(LEGACY_SESSION_KEY);
+      console.log(`[max] Migrated legacy session key to '${dbKey}'`);
+    }
+  }
+
+  // Named workspaces also store session ID in worker_sessions table
+  if (!savedSessionId && wsName !== "default") {
+    const row = getWorkspace(wsName);
+    if (row?.copilot_session_id) {
+      savedSessionId = row.copilot_session_id;
+    }
+  }
+
+  if (savedSessionId) {
+    try {
+      console.log(`[max] Resuming session for workspace '${wsName}' (${savedSessionId.slice(0, 8)}…)`);
+      const session = await client.resumeSession(savedSessionId, sessionParams);
+      console.log(`[max] Resumed workspace '${wsName}' session`);
+      ws.currentModel = ws.currentModel || config.copilotModel;
+      return session;
+    } catch (err) {
+      console.log(`[max] Could not resume '${wsName}' session: ${err instanceof Error ? err.message : err}. Creating new.`);
+      deleteState(dbKey);
+      if (wsName !== "default") clearWorkspaceSessionId(wsName);
+    }
+  }
+
+  console.log(`[max] Creating new session for workspace '${wsName}'${workingDir ? ` (dir: ${workingDir})` : ""}`);
+  const session = await client.createSession(sessionParams);
+  setState(dbKey, session.sessionId);
+  if (wsName !== "default") saveWorkspaceSessionId(wsName, session.sessionId);
+  console.log(`[max] Created workspace '${wsName}' session ${session.sessionId.slice(0, 8)}…`);
+  ws.currentModel = ws.currentModel || config.copilotModel;
   return session;
+}
+
+/** Ensure a workspace has an active session, coalescing concurrent callers. */
+async function ensureWorkspaceSession(wsName: string, workingDir?: string): Promise<CopilotSession> {
+  const ws = getOrCreateWorkspace(wsName);
+  if (ws.session) return ws.session;
+  if (ws.createPromise) return ws.createPromise;
+
+  ws.createPromise = createOrResumeWorkspaceSession(wsName, workingDir);
+  try {
+    const session = await ws.createPromise;
+    ws.session = session;
+    return session;
+  } finally {
+    ws.createPromise = undefined;
+  }
 }
 
 export async function initOrchestrator(client: CopilotClient): Promise<void> {
@@ -296,9 +345,9 @@ export async function initOrchestrator(client: CopilotClient): Promise<void> {
   console.log(`[max] Persistent session mode — conversation history maintained by SDK`);
   startHealthCheck();
 
-  // Eagerly create/resume the orchestrator session
+  // Eagerly create/resume the default workspace session
   try {
-    await ensureOrchestratorSession();
+    await ensureWorkspaceSession("default");
   } catch (err) {
     console.error(`[max] Failed to create initial session (will retry on first message):`, err instanceof Error ? err.message : err);
   }
@@ -307,14 +356,17 @@ export async function initOrchestrator(client: CopilotClient): Promise<void> {
 /** How long to wait for the orchestrator to finish a turn (10 min). */
 const ORCHESTRATOR_TIMEOUT_MS = 600_000;
 
-/** Send a prompt on the persistent session, return the response. */
-async function executeOnSession(
+/** Send a prompt on a workspace session, return the response. */
+async function executeOnWorkspaceSession(
+  wsName: string,
+  workingDir: string | undefined,
   prompt: string,
   callback: MessageCallback,
   attachments?: Array<{ type: "file"; path: string; displayName?: string }>
 ): Promise<string> {
-  const session = await ensureOrchestratorSession();
-  currentCallback = callback;
+  const ws = getOrCreateWorkspace(wsName);
+  const session = await ensureWorkspaceSession(wsName, workingDir);
+  ws.currentCallback = callback;
 
   let accumulated = "";
   let toolCallExecuted = false;
@@ -351,90 +403,88 @@ async function executeOnSession(
         console.log(`[max] Timeout after ${ORCHESTRATOR_TIMEOUT_MS / 1000}s but have ${accumulated.length} chars — returning partial response`);
         return accumulated;
       }
-      // No text yet but tool calls ran — the session is working in the background
-      // (e.g. delegate_to_agent dispatched). Don't error out.
       if (toolCallCount > 0) {
         console.log(`[max] Timeout after ${ORCHESTRATOR_TIMEOUT_MS / 1000}s — ${toolCallCount} tool call(s) executed but no text yet. Session is still working.`);
         return "I'm still working on this — I've started processing but it's taking longer than expected. I'll send you the results when I'm done.";
       }
-      // No text, no tool calls — the session is truly stuck
       console.log(`[max] Timeout after ${ORCHESTRATOR_TIMEOUT_MS / 1000}s with no activity. Session may be stuck.`);
       return "Sorry, that request timed out before I could start working on it. Try again or break it into smaller pieces?";
     }
 
     // If the session is broken, invalidate it so it's recreated on next attempt
     if (/closed|destroy|disposed|invalid|expired|not found/i.test(msg)) {
-      console.log(`[max] Session appears dead, will recreate: ${msg}`);
-      orchestratorSession = undefined;
-      currentSessionModel = undefined;
-      deleteState(ORCHESTRATOR_SESSION_KEY);
+      console.log(`[max] Session '${wsName}' appears dead, will recreate: ${msg}`);
+      ws.session = undefined;
+      ws.currentModel = undefined;
+      deleteState(sessionDbKey(wsName));
+      if (wsName !== "default") clearWorkspaceSessionId(wsName);
     }
     throw err;
   } finally {
     unsubDelta();
     unsubToolDone();
-    currentCallback = undefined;
+    ws.currentCallback = undefined;
   }
 }
 
-/** Process the message queue one at a time. */
-async function processQueue(): Promise<void> {
-  if (processing) {
-    if (messageQueue.length > 0) {
-      console.log(`[max] Message queued (${messageQueue.length} waiting — orchestrator is busy)`);
+/** Process the message queue for a workspace one at a time. */
+async function processWorkspaceQueue(wsName: string, workingDir?: string): Promise<void> {
+  const ws = getOrCreateWorkspace(wsName);
+  if (ws.processing) {
+    if (ws.queue.length > 0) {
+      console.log(`[max] Message queued for workspace '${wsName}' (${ws.queue.length} waiting)`);
     }
     return;
   }
-  processing = true;
+  ws.processing = true;
 
-  while (messageQueue.length > 0) {
-    const item = messageQueue.shift()!;
-    currentSourceChannel = item.sourceChannel;
-    currentSourceKey = item.channelKey;
+  while (ws.queue.length > 0) {
+    const item = ws.queue.shift()!;
+    ws.currentSourceKey = item.channelKey;
+    const ctx: RequestContext = { sourceKey: item.channelKey, sourceChannel: item.sourceChannel };
     try {
-      let result: string;
+      const result = await requestContext.run(ctx, async (): Promise<string> => {
+        if (item.targetAgent && item.targetAgent !== "max") {
+          // @mention switches the active agent — route through the workspace session
+          setActiveAgent(item.channelKey || "default", item.targetAgent);
+          return executeOnWorkspaceSession(wsName, workingDir, item.prompt, item.callback, item.attachments);
+        }
 
-      if (item.targetAgent && item.targetAgent !== "max") {
-        // @mention switches the active agent — route through the orchestrator session
-        // The prompt already carries the @mention context for the LLM
-        setActiveAgent(item.channelKey || "default", item.targetAgent);
-        result = await executeOnSession(item.prompt, item.callback, item.attachments);
-      } else {
-        // Route the model before executing on orchestrator
-        const routeResult = await resolveModel(item.prompt, currentSessionModel || config.copilotModel, recentTiers);
+        // Route the model before executing
+        const routeResult = await resolveModel(item.prompt, ws.currentModel || config.copilotModel, ws.recentTiers);
         if (routeResult.switched) {
-          console.log(`[max] Auto: switching to ${routeResult.model} (${routeResult.overrideName || routeResult.tier})`);
+          console.log(`[max] Auto: switching to ${routeResult.model} (${routeResult.overrideName || routeResult.tier}) in workspace '${wsName}'`);
           config.copilotModel = routeResult.model;
-          if (orchestratorSession) {
+          if (ws.session) {
             try {
-              await orchestratorSession.setModel(routeResult.model);
-              currentSessionModel = routeResult.model;
-              console.log(`[max] Model switched in-place via setModel()`);
+              await ws.session.setModel(routeResult.model);
+              ws.currentModel = routeResult.model;
+              console.log(`[max] Model switched in-place for workspace '${wsName}'`);
             } catch (err) {
-              console.log(`[max] setModel() failed, will recreate session: ${err instanceof Error ? err.message : err}`);
-              orchestratorSession = undefined;
-              deleteState(ORCHESTRATOR_SESSION_KEY);
+              console.log(`[max] setModel() failed for '${wsName}', will recreate: ${err instanceof Error ? err.message : err}`);
+              ws.session = undefined;
+              deleteState(sessionDbKey(wsName));
+              if (wsName !== "default") clearWorkspaceSessionId(wsName);
             }
           }
         }
         if (routeResult.tier) {
-          recentTiers.push(routeResult.tier);
-          if (recentTiers.length > 5) recentTiers = recentTiers.slice(-5);
+          ws.recentTiers.push(routeResult.tier);
+          if (ws.recentTiers.length > 5) ws.recentTiers = ws.recentTiers.slice(-5);
         }
+        ws.lastRouteResult = routeResult;
         lastRouteResult = routeResult;
 
-        result = await executeOnSession(item.prompt, item.callback, item.attachments);
-      }
-
+        return executeOnWorkspaceSession(wsName, workingDir, item.prompt, item.callback, item.attachments);
+      });
       item.resolve(result);
     } catch (err) {
       item.reject(err);
     }
-    currentSourceChannel = undefined;
-    currentSourceKey = undefined;
+    ws.currentSourceKey = undefined;
   }
 
-  processing = false;
+  ws.processing = false;
 }
 
 function isRecoverableError(err: unknown): boolean {
@@ -477,13 +527,18 @@ export async function sendToOrchestrator(
     source.type === "feishu" ? "feishu" : undefined;
   const channelKey = getSourceKey(source);
 
+  // Resolve workspace for this channel
+  const wsName = channelKey ? getActiveWorkspace(channelKey) : "default";
+  const workingDir = wsName !== "default" ? getWorkspace(wsName)?.working_dir : undefined;
+
   // Enqueue and process
   void (async () => {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const finalContent = await new Promise<string>((resolve, reject) => {
-          messageQueue.push({ prompt: taggedPrompt, attachments, callback, sourceChannel, targetAgent, channelKey, resolve, reject });
-          processQueue();
+          const ws = getOrCreateWorkspace(wsName);
+          ws.queue.push({ prompt: taggedPrompt, attachments, callback, sourceChannel, targetAgent, channelKey, resolve, reject });
+          processWorkspaceQueue(wsName, workingDir);
         });
         // Deliver response to user FIRST, then log best-effort
         callback(finalContent, true);
@@ -520,33 +575,42 @@ export async function sendToOrchestrator(
 /** Cancel the in-flight message and queued work for a specific source when provided. */
 export async function cancelCurrentMessage(sourceKey?: string): Promise<boolean> {
   let drained = 0;
-  for (let i = messageQueue.length - 1; i >= 0; i--) {
-    const item = messageQueue[i];
-    if (sourceKey && item.channelKey !== sourceKey) continue;
-    messageQueue.splice(i, 1);
-    item.reject(new Error("Cancelled"));
-    drained++;
+
+  // Drain matching queued messages from all workspaces
+  for (const ws of workspacePool.values()) {
+    for (let i = ws.queue.length - 1; i >= 0; i--) {
+      const item = ws.queue[i];
+      if (sourceKey && item.channelKey !== sourceKey) continue;
+      ws.queue.splice(i, 1);
+      item.reject(new Error("Cancelled"));
+      drained++;
+    }
   }
 
-  // Abort the active session request
-  if (orchestratorSession && currentCallback && (!sourceKey || currentSourceKey === sourceKey)) {
-    try {
-      await orchestratorSession.abort();
-      console.log(`[max] Aborted in-flight request`);
-      return true;
-    } catch (err) {
-      console.error(`[max] Abort failed:`, err instanceof Error ? err.message : err);
+  // Abort the in-flight request in the matching workspace
+  for (const ws of workspacePool.values()) {
+    if (ws.session && ws.currentCallback && (!sourceKey || ws.currentSourceKey === sourceKey)) {
+      try {
+        await ws.session.abort();
+        console.log(`[max] Aborted in-flight request`);
+        return true;
+      } catch (err) {
+        console.error(`[max] Abort failed:`, err instanceof Error ? err.message : err);
+      }
     }
   }
 
   return drained > 0;
 }
 
-/** Switch the model on the live orchestrator session without destroying it. */
+/** Switch the model on the live session for the current async context's workspace. */
 export function switchSessionModel(newModel: string): Promise<void> {
-  if (orchestratorSession) {
-    return orchestratorSession.setModel(newModel).then(() => {
-      currentSessionModel = newModel;
+  const channelKey = requestContext.getStore()?.sourceKey;
+  const wsName = channelKey ? getActiveWorkspace(channelKey) : "default";
+  const ws = workspacePool.get(wsName);
+  if (ws?.session) {
+    return ws.session.setModel(newModel).then(() => {
+      ws.currentModel = newModel;
     });
   }
   return Promise.resolve();
@@ -572,3 +636,4 @@ export function getAgentInfo(): Array<{ slug: string; name: string; model: strin
 export async function shutdownAgents(): Promise<void> {
   await clearActiveTasks();
 }
+

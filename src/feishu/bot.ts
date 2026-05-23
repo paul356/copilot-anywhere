@@ -12,6 +12,7 @@ import {
   handleModel,
   handleModels,
   handleSkills,
+  handleWorkspace,
 } from "../commands.js";
 import { buildCardContent, buildTextContent, chunkMessage } from "./formatter.js";
 
@@ -84,6 +85,8 @@ async function maybeHandleCommand(text: string, chatIdForCommands: string): Prom
       return handleAgents();
     case "auto":
       return handleAuto();
+    case "ws":
+      return await handleWorkspace(arg, `feishu:${chatIdForCommands}`);
     case "restart":
       setTimeout(() => {
         restartDaemon().catch((err) => {

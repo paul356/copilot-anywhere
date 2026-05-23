@@ -3,6 +3,7 @@
 // The Telegram bot keeps its own command handlers because it has bespoke
 // features (image replies, /models with chunking, /agents helpers, etc.).
 
+import { existsSync } from "fs";
 import { config, persistModel } from "./config.js";
 import { listSkills } from "./copilot/skills.js";
 import {
@@ -12,6 +13,10 @@ import {
 import { getRouterConfig, updateRouterConfig } from "./copilot/router.js";
 import { ensureWikiStructure } from "./wiki/fs.js";
 import { parseIndex } from "./wiki/index-manager.js";
+import {
+  listWorkspaces, getWorkspace, createWorkspace, deleteWorkspace,
+  getActiveWorkspace, setActiveWorkspace,
+} from "./store/db.js";
 
 export const HELP_TEXT =
   "I'm Max, your AI daemon.\n\n" +
@@ -26,6 +31,7 @@ export const HELP_TEXT =
   "/skills — List installed skills\n" +
   "/agents — List running agents\n" +
   "/workers — Alias for /agents\n" +
+  "/ws — Manage workspaces (directories)\n" +
   "/restart — Restart Max\n" +
   "/help — Show this help";
 
@@ -109,4 +115,82 @@ export function handleAuto(): string {
   const newState = !current.enabled;
   updateRouterConfig({ enabled: newState });
   return newState ? "⚡ Auto mode on" : `Auto mode off · using ${config.copilotModel}`;
+}
+
+/**
+ * Handle /ws commands for workspace management.
+ * channelKey: e.g. "telegram:123" or "feishu:abc" — used to track active workspace per channel.
+ */
+export async function handleWorkspace(arg: string | undefined, channelKey: string): Promise<string> {
+  const parts = (arg ?? "").trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0]?.toLowerCase();
+
+  // /ws or /ws list — show all workspaces
+  if (!sub || sub === "list") {
+    const workspaces = listWorkspaces();
+    const active = getActiveWorkspace(channelKey);
+    const defaultMark = active === "default" ? " ← active" : "";
+    const lines = [`• default (daemon cwd)${defaultMark}`];
+    for (const ws of workspaces) {
+      const mark = ws.name === active ? " ← active" : "";
+      lines.push(`• ${ws.name}  ${ws.working_dir}${mark}`);
+    }
+    return lines.join("\n");
+  }
+
+  // /ws new <name> <path>
+  if (sub === "new") {
+    const name = parts[1];
+    const dir = parts.slice(2).join(" ");
+    if (!name || !dir) {
+      return "Usage: /ws new <name> <path>";
+    }
+    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) {
+      return "Workspace name must be lowercase alphanumeric with optional hyphens (e.g. my-project).";
+    }
+    if (name === "default") {
+      return "Cannot create a workspace named 'default'.";
+    }
+    if (getWorkspace(name)) {
+      return `Workspace '${name}' already exists. Use /ws switch ${name} to activate it.`;
+    }
+    if (!existsSync(dir)) {
+      return `Directory not found: ${dir}`;
+    }
+    createWorkspace(name, dir);
+    return `✅ Created workspace '${name}' → ${dir}\nUse /ws switch ${name} to activate it.`;
+  }
+
+  // /ws switch <name>
+  if (sub === "switch") {
+    const name = parts[1];
+    if (!name) return "Usage: /ws switch <name>";
+    if (name !== "default" && !getWorkspace(name)) {
+      return `Workspace '${name}' not found. Use /ws list to see available workspaces.`;
+    }
+    setActiveWorkspace(channelKey, name);
+    if (name === "default") {
+      return `Switched to default workspace (daemon cwd).`;
+    }
+    const ws = getWorkspace(name)!;
+    return `Switched to workspace '${name}' → ${ws.working_dir}`;
+  }
+
+  // /ws delete <name>
+  if (sub === "delete" || sub === "remove") {
+    const name = parts[1];
+    if (!name) return `Usage: /ws ${sub} <name>`;
+    if (name === "default") return "Cannot delete the default workspace.";
+    if (!getWorkspace(name)) {
+      return `Workspace '${name}' not found.`;
+    }
+    // If this channel had it active, revert to default
+    if (getActiveWorkspace(channelKey) === name) {
+      setActiveWorkspace(channelKey, "default");
+    }
+    deleteWorkspace(name);
+    return `🗑 Deleted workspace '${name}'.`;
+  }
+
+  return "Unknown subcommand. Usage: /ws [list | new <name> <path> | switch <name> | delete <name>]";
 }
