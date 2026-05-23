@@ -7,7 +7,7 @@ import { homedir } from "os";
 import { listSkills, createSkill, removeSkill } from "./skills.js";
 import { config, persistModel } from "../config.js";
 import { SESSIONS_DIR } from "../paths.js";
-import { getCurrentSourceKey, switchSessionModel } from "./orchestrator.js";
+import { getCurrentSourceKey, switchSessionModel, getWorkingDirForSourceKey } from "./orchestrator.js";
 import { getRouterConfig, updateRouterConfig } from "./router.js";
 import { ensureWikiStructure, readPage, writePage, deletePage, listPages, writeRawSource, listSources, getWikiDir, assertPagePath } from "../wiki/fs.js";
 import { searchIndex, addToIndex, removeFromIndex, parseIndex, buildIndexEntryForPage, type IndexEntry } from "../wiki/index-manager.js";
@@ -93,7 +93,8 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         try {
           // Get all tools so we can filter for this agent
           const allTools = createTools(deps);
-          session = await createEphemeralAgentSession(agent.slug, deps.client, allTools, args.model_override);
+          const workingDir = getWorkingDirForSourceKey(getCurrentSourceKey());
+          session = await createEphemeralAgentSession(agent.slug, deps.client, allTools, args.model_override, workingDir);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return `Failed to create session for @${agent.slug}: ${msg}`;
@@ -267,7 +268,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         limit: z.number().int().min(1).max(100).optional().describe("Max sessions to return (default 20)"),
       }),
       handler: async (args) => {
-        const sessionStateDir = join(homedir(), ".copilot", "session-state");
+        const sessionStateDir = join(SESSIONS_DIR, "session-state");
         const limit = args.limit || 20;
 
         let entries: { id: string; cwd: string; summary: string; updatedAt: Date }[] = [];
