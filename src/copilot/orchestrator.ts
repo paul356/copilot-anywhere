@@ -299,13 +299,23 @@ async function createOrResumeWorkspaceSession(wsName: string, workingDir?: strin
       console.log(`[max] Resuming session for workspace '${wsName}' (${savedSessionId.slice(0, 8)}…, configDir: ${resolvedConfigDir})`);
       const session = await client.resumeSession(savedSessionId, sessionParams);
       console.log(`[max] Resumed workspace '${wsName}' session`);
+      deleteState(`${dbKey}:backup`);
       ws.currentModel = ws.currentModel || config.copilotModel;
       return session;
     } catch (err) {
-      console.log(`[max] Could not resume '${wsName}' session: ${err instanceof Error ? err.message : err}. Creating new.`);
-      deleteState(dbKey);
+      console.log(`[max] Could not resume '${wsName}' session: ${err instanceof Error ? err.message : err}.`);
       deleteState(`configDir:${wsName}`);
       if (wsName !== "default") clearWorkspaceSessionId(wsName);
+      // Restore previous session if this was a failed attach attempt
+      const backupId = getState(`${dbKey}:backup`);
+      if (backupId) {
+        setState(dbKey, backupId);
+        deleteState(`${dbKey}:backup`);
+        console.log(`[max] Restored previous session for workspace '${wsName}' (${backupId.slice(0, 8)}…)`);
+      } else {
+        deleteState(dbKey);
+      }
+      throw err;
     }
   }
 

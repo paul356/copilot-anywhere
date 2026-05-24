@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { approveAll, defineTool, type CopilotClient, type CopilotSession, type Tool } from "@github/copilot-sdk";
-import { getDb, getActiveWorkspace, setState, saveWorkspaceSessionId, saveWorkspaceConfigDir, createWorkspace, getWorkspace } from "../store/db.js";
+import { getDb, getActiveWorkspace, getState, setState, deleteState, saveWorkspaceSessionId, saveWorkspaceConfigDir, createWorkspace, getWorkspace } from "../store/db.js";
 import { readdirSync, readFileSync, statSync, existsSync } from "fs";
 import { join, sep, resolve } from "path";
 import { homedir } from "os";
@@ -368,6 +368,10 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           // Wire the attached session into the current channel's active workspace
           const sourceKey = getCurrentSourceKey();
           const wsName = sourceKey ? getActiveWorkspace(sourceKey) : "default";
+
+          // Back up the current session ID so we can restore it if resume fails
+          const prevSessionId = getState(`session:${wsName}`);
+          if (prevSessionId) setState(`session:${wsName}:backup`, prevSessionId);
 
           setState(`session:${wsName}`, args.session_id);
           if (sessionConfigDir) {
