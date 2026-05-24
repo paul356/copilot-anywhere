@@ -27,6 +27,7 @@ export function getDb(): Database.Database {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slug TEXT UNIQUE NOT NULL,
         name TEXT NOT NULL,
+        copilot_session_id TEXT,
         model TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'idle',
         current_task TEXT,
@@ -34,6 +35,12 @@ export function getDb(): Database.Database {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migration: add copilot_session_id if missing (existing DBs)
+    try {
+      db.exec(`ALTER TABLE agent_sessions ADD COLUMN copilot_session_id TEXT`);
+    } catch {
+      // Column already exists, ignore
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_tasks (
         task_id TEXT PRIMARY KEY,

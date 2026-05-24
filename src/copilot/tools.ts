@@ -333,9 +333,9 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
 
           const db = getDb();
           db.prepare(
-            `INSERT OR REPLACE INTO agent_sessions (slug, copilot_session_id, model, status)
-             VALUES (?, ?, ?, 'idle')`
-          ).run(args.name, args.session_id, config.copilotModel);
+            `INSERT OR REPLACE INTO agent_sessions (slug, name, copilot_session_id, model, status)
+             VALUES (?, ?, ?, ?, 'idle')`
+          ).run(args.name, args.name, args.session_id, config.copilotModel);
 
           return `Attached to session ${args.session_id.slice(0, 8)}… as '${args.name}'.`;
         } catch (err) {
