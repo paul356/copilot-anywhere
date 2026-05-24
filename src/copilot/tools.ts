@@ -268,7 +268,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         limit: z.number().int().min(1).max(100).optional().describe("Max sessions to return (default 20)"),
       }),
       handler: async (args) => {
-        const sessionStateDir = join(SESSIONS_DIR, "session-state");
+        const sessionStateDir = join(homedir(), ".copilot", "session-state");
         const limit = args.limit || 20;
 
         let entries: { id: string; cwd: string; summary: string; updatedAt: Date }[] = [];
