@@ -178,6 +178,15 @@ export function getWorkingDirForSourceKey(channelKey: string | undefined): strin
   return getWorkspace(wsName)?.working_dir;
 }
 
+/** Drop the in-memory session for a workspace so the next message triggers a fresh resume. */
+export function resetWorkspaceSession(wsName: string): void {
+  const ws = workspacePool.get(wsName);
+  if (ws) {
+    ws.session = undefined;
+    ws.currentModel = undefined;
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -238,25 +247,6 @@ async function createOrResumeWorkspaceSession(wsName: string, workingDir?: strin
     bufferExhaustionThreshold: 0.95,
   };
 
-  const sessionParams = {
-    model: ws.currentModel || config.copilotModel,
-    configDir: SESSIONS_DIR,
-    streaming: true,
-    ...(workingDir ? { workingDirectory: workingDir } : {}),
-    systemMessage: {
-      content: getOrchestratorSystemMessage({
-        selfEditEnabled: config.selfEditEnabled,
-        memorySummary: memorySummary || undefined,
-        agentRoster: buildAgentRoster(),
-      }),
-    },
-    tools,
-    mcpServers,
-    skillDirectories,
-    onPermissionRequest: orchestratorPermissionHandler,
-    infiniteSessions,
-  };
-
   // Resolve saved session ID: new key first, then legacy key (default workspace only)
   const dbKey = sessionDbKey(wsName);
   let savedSessionId = getState(dbKey);
@@ -279,9 +269,34 @@ async function createOrResumeWorkspaceSession(wsName: string, workingDir?: strin
     }
   }
 
+  // Resolve configDir: use per-session override if set (e.g. attached VS Code session)
+  const savedConfigDir = getState(`configDir:${wsName}`)
+    ?? (wsName !== "default" ? getWorkspace(wsName)?.config_dir ?? null : null)
+    ?? null;
+  const resolvedConfigDir = savedConfigDir ?? SESSIONS_DIR;
+
+  const sessionParams = {
+    model: ws.currentModel || config.copilotModel,
+    configDir: resolvedConfigDir,
+    streaming: true,
+    ...(workingDir ? { workingDirectory: workingDir } : {}),
+    systemMessage: {
+      content: getOrchestratorSystemMessage({
+        selfEditEnabled: config.selfEditEnabled,
+        memorySummary: memorySummary || undefined,
+        agentRoster: buildAgentRoster(),
+      }),
+    },
+    tools,
+    mcpServers,
+    skillDirectories,
+    onPermissionRequest: orchestratorPermissionHandler,
+    infiniteSessions,
+  };
+
   if (savedSessionId) {
     try {
-      console.log(`[max] Resuming session for workspace '${wsName}' (${savedSessionId.slice(0, 8)}…)`);
+      console.log(`[max] Resuming session for workspace '${wsName}' (${savedSessionId.slice(0, 8)}…, configDir: ${resolvedConfigDir})`);
       const session = await client.resumeSession(savedSessionId, sessionParams);
       console.log(`[max] Resumed workspace '${wsName}' session`);
       ws.currentModel = ws.currentModel || config.copilotModel;
@@ -289,6 +304,7 @@ async function createOrResumeWorkspaceSession(wsName: string, workingDir?: strin
     } catch (err) {
       console.log(`[max] Could not resume '${wsName}' session: ${err instanceof Error ? err.message : err}. Creating new.`);
       deleteState(dbKey);
+      deleteState(`configDir:${wsName}`);
       if (wsName !== "default") clearWorkspaceSessionId(wsName);
     }
   }

@@ -1,13 +1,13 @@
 import { z } from "zod";
 import { approveAll, defineTool, type CopilotClient, type CopilotSession, type Tool } from "@github/copilot-sdk";
-import { getDb } from "../store/db.js";
-import { readdirSync, readFileSync, statSync } from "fs";
+import { getDb, getActiveWorkspace, setState, saveWorkspaceSessionId, saveWorkspaceConfigDir, createWorkspace, getWorkspace } from "../store/db.js";
+import { readdirSync, readFileSync, statSync, existsSync } from "fs";
 import { join, sep, resolve } from "path";
 import { homedir } from "os";
 import { listSkills, createSkill, removeSkill } from "./skills.js";
 import { config, persistModel } from "../config.js";
 import { SESSIONS_DIR } from "../paths.js";
-import { getCurrentSourceKey, switchSessionModel, getWorkingDirForSourceKey } from "./orchestrator.js";
+import { getCurrentSourceKey, switchSessionModel, getWorkingDirForSourceKey, resetWorkspaceSession } from "./orchestrator.js";
 import { getRouterConfig, updateRouterConfig } from "./router.js";
 import { ensureWikiStructure, readPage, writePage, deletePage, listPages, writeRawSource, listSources, getWikiDir, assertPagePath } from "../wiki/fs.js";
 import { searchIndex, addToIndex, removeFromIndex, parseIndex, buildIndexEntryForPage, type IndexEntry } from "../wiki/index-manager.js";
@@ -326,18 +326,66 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
       }),
       handler: async (args) => {
         try {
-          const session = await deps.client.resumeSession(args.session_id, {
-            model: config.copilotModel,
-            onPermissionRequest: approveAll,
-          });
+          // Detect which configDir holds the real session data (events.jsonl)
+          const candidateDirs = [
+            SESSIONS_DIR,
+            join(homedir(), ".copilot"),
+          ];
+          let sessionConfigDir: string | undefined;
+          let sessionCwd: string | undefined;
+          for (const base of candidateDirs) {
+            const sessionDir = join(base, "session-state", args.session_id);
+            if (existsSync(join(sessionDir, "events.jsonl"))) {
+              sessionConfigDir = base;
+              try {
+                const content = readFileSync(join(sessionDir, "workspace.yaml"), "utf-8");
+                sessionCwd = parseSimpleYaml(content).cwd;
+              } catch { /* ignore */ }
+              break;
+            }
+          }
+          // Fallback: read workspace.yaml even if no events.jsonl yet
+          if (!sessionConfigDir) {
+            for (const base of candidateDirs) {
+              try {
+                const content = readFileSync(join(base, "session-state", args.session_id, "workspace.yaml"), "utf-8");
+                sessionConfigDir = base;
+                sessionCwd = parseSimpleYaml(content).cwd;
+                break;
+              } catch { /* ignore */ }
+            }
+          }
 
-          const db = getDb();
-          db.prepare(
-            `INSERT OR REPLACE INTO agent_sessions (slug, name, copilot_session_id, model, status)
-             VALUES (?, ?, ?, ?, 'idle')`
-          ).run(args.name, args.name, args.session_id, config.copilotModel);
+          // Check if the session is locked by another client (e.g. VS Code)
+          if (sessionConfigDir) {
+            const sessionDir = join(sessionConfigDir, "session-state", args.session_id);
+            const lockFiles = readdirSync(sessionDir).filter(f => f.startsWith("inuse.") && f.endsWith(".lock"));
+            if (lockFiles.length > 0) {
+              return `Session ${args.session_id.slice(0, 8)}… is currently in use by another client (${lockFiles[0]}). Close the other client first and try again.`;
+            }
+          }
 
-          return `Attached to session ${args.session_id.slice(0, 8)}… as '${args.name}'.`;
+          // Wire the attached session into the current channel's active workspace
+          const sourceKey = getCurrentSourceKey();
+          const wsName = sourceKey ? getActiveWorkspace(sourceKey) : "default";
+
+          setState(`session:${wsName}`, args.session_id);
+          if (sessionConfigDir) {
+            setState(`configDir:${wsName}`, sessionConfigDir);
+          }
+          if (wsName !== "default") {
+            if (!getWorkspace(wsName) && sessionCwd) {
+              createWorkspace(wsName, sessionCwd);
+            }
+            saveWorkspaceSessionId(wsName, args.session_id);
+            if (sessionConfigDir) saveWorkspaceConfigDir(wsName, sessionConfigDir);
+          }
+
+          // Drop the in-memory session so the next message resumes the attached one
+          resetWorkspaceSession(wsName);
+
+          const dirInfo = sessionCwd ? ` (${sessionCwd})` : "";
+          return `Attached to session ${args.session_id.slice(0, 8)}…${dirInfo}. Send your next message to continue in that session's context.`;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return `Failed to attach to session: ${msg}`;

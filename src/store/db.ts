@@ -41,6 +41,12 @@ export function getDb(): Database.Database {
     } catch {
       // Column already exists, ignore
     }
+    // Migration: add config_dir to worker_sessions (existing DBs)
+    try {
+      db.exec(`ALTER TABLE worker_sessions ADD COLUMN config_dir TEXT`);
+    } catch {
+      // Column already exists, ignore
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_tasks (
         task_id TEXT PRIMARY KEY,
@@ -204,16 +210,17 @@ export interface WorkspaceRow {
   name: string;
   working_dir: string;
   copilot_session_id: string | null;
+  config_dir: string | null;
 }
 
 export function listWorkspaces(): WorkspaceRow[] {
   const db = getDb();
-  return db.prepare(`SELECT name, working_dir, copilot_session_id FROM worker_sessions ORDER BY name`).all() as WorkspaceRow[];
+  return db.prepare(`SELECT name, working_dir, copilot_session_id, config_dir FROM worker_sessions ORDER BY name`).all() as WorkspaceRow[];
 }
 
 export function getWorkspace(name: string): WorkspaceRow | undefined {
   const db = getDb();
-  return db.prepare(`SELECT name, working_dir, copilot_session_id FROM worker_sessions WHERE name = ?`).get(name) as WorkspaceRow | undefined;
+  return db.prepare(`SELECT name, working_dir, copilot_session_id, config_dir FROM worker_sessions WHERE name = ?`).get(name) as WorkspaceRow | undefined;
 }
 
 export function createWorkspace(name: string, workingDir: string): void {
@@ -229,6 +236,11 @@ export function deleteWorkspace(name: string): void {
 export function saveWorkspaceSessionId(name: string, sessionId: string): void {
   const db = getDb();
   db.prepare(`UPDATE worker_sessions SET copilot_session_id = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`).run(sessionId, name);
+}
+
+export function saveWorkspaceConfigDir(name: string, configDir: string): void {
+  const db = getDb();
+  db.prepare(`UPDATE worker_sessions SET config_dir = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`).run(configDir, name);
 }
 
 export function clearWorkspaceSessionId(name: string): void {
