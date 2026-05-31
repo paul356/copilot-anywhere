@@ -266,8 +266,8 @@ export class MessageHandler {
             const unsubDelta = session.on("assistant.message_delta", (event) => {
               const chunk = event.data.deltaContent;
               if (chunk) {
-                callback(chunk, false);
                 fullText += chunk;
+                callback(fullText, false);
               }
             });
             const unsubIdle = session.on("session.idle", () => {
