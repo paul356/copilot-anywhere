@@ -517,6 +517,42 @@ function connectSSE(): void {
               streamLineBuffer = "";
               inStreamCodeBlock = false;
               streamIsFirstLine = true;
+            } else if (event.type === "question") {
+              // LLM is asking the user a question via ask_user
+              stopThinking("question-event");
+              isStreaming = false;
+              streamedContent = "";
+              streamLineBuffer = "";
+              inStreamCodeBlock = false;
+              streamIsFirstLine = true;
+
+              process.stdout.write("\n");
+              process.stdout.write(`  ${C.yellow("💬")} ${C.bold(event.question)}\n`);
+              if (Array.isArray(event.choices) && event.choices.length > 0) {
+                event.choices.forEach((c: string, i: number) => {
+                  process.stdout.write(`  ${C.dim(`${i + 1}.`)} ${c}\n`);
+                });
+                const hint = event.allowFreeform !== false
+                  ? `  ${C.dim("(type a number, or anything else for a custom answer)")}\n`
+                  : `  ${C.dim("(type a number to choose)")}\n`;
+                process.stdout.write(hint);
+              }
+              process.stdout.write("\n");
+
+              // Collect user answer (one-shot, not a regular prompt)
+              rl.question(`  ${C.yellow("›")} `, (answer: string) => {
+                const trimmed = answer.trim();
+                let resolved = trimmed;
+                // If choices provided and user typed a number, resolve to the choice text
+                if (Array.isArray(event.choices) && /^\d+$/.test(trimmed)) {
+                  const idx = parseInt(trimmed, 10) - 1;
+                  if (idx >= 0 && idx < event.choices.length) {
+                    resolved = event.choices[idx];
+                  }
+                }
+                debugLog("question-answered", { question: event.question, answer: resolved });
+                sendAnswer(resolved);
+              });
             } else if (event.type === "message") {
               debugLog("stream-message", {
                 requestId: activeRequestId,
@@ -705,6 +741,45 @@ function apiDelete(path: string, cb: (data: any) => void): void {
     console.error(C.red(`  Error: ${err.message}`));
     rl.prompt();
   });
+  req.end();
+}
+
+/** POST an answer to an ask_user question from the LLM. */
+function sendAnswer(answer: string): void {
+  debugLog("answer-send", { connectionId, answerLength: answer.length });
+  if (!connectionId) {
+    console.error(C.red("  Failed to answer: not connected.\n"));
+    rl.prompt();
+    return;
+  }
+  const json = JSON.stringify({ connectionId, answer });
+  const url = new URL("/answer", API_BASE);
+  const req = http.request(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(json),
+      ...authHeaders(),
+    },
+  }, (res) => {
+    let data = "";
+    res.on("data", (chunk) => (data += chunk));
+    res.on("end", () => {
+      try {
+        const result = JSON.parse(data);
+        if (!result.ok) {
+          console.error(C.red(`  Failed to send answer: no pending question.\n`));
+        }
+      } catch { /* ignore */ }
+      debugLog("answer-sent", { ok: true });
+      // rl.prompt() is called by the message event handler after streaming completes
+    });
+  });
+  req.on("error", (err) => {
+    console.error(C.red(`  Failed to send answer: ${err.message}\n`));
+    rl.prompt(); // Restore prompt on error — LLM will timeout without the answer
+  });
+  req.write(json);
   req.end();
 }
 

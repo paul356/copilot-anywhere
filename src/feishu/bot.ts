@@ -208,10 +208,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       const fullText = await processMessage(text, senderOpenId, messageHandler);
 
       if (fullText.length > 0) {
-        const truncated = fullText.length > 20_000
-          ? fullText.slice(0, 20_000) + "\n\n_(响应过长，已截断)_"
-          : fullText;
-        await sendChunkedReply(event.message.message_id, event.message.chat_id, truncated);
+        await sendChunkedReply(event.message.message_id, event.message.chat_id, fullText);
       }
     },
   });

@@ -73,6 +73,12 @@ export class MessageHandler {
   private channelCancels = new Set<string>();
   /** Currently processing promises per channel — used for cancellation */
   private channelActive = new Map<string, { reject: (err: Error) => void }>();
+  /** Per-channel callbacks for the currently in-flight prompt (used by user input delegation) */
+  private activeCallbacks = new Map<string, MessageCallback>();
+  /** sessionId → channelKey for the in-flight prompt */
+  private sessionChannels = new Map<string, string>();
+  /** Per-channel pending user-input resolvers */
+  private pendingInput = new Map<string, { resolve: (answer: string) => void }>();
 
   constructor(options: MessageHandlerOptions) {
     this.options = options;
@@ -119,6 +125,60 @@ export class MessageHandler {
       this.channelQueues.delete(channelId);
     }
     this.channelProcessing.clear();
+  }
+
+  // ── User Input (ask_user) ────────────────────────────────────
+
+  /**
+   * Called by copilot-client's onUserInputRequest handler when the LLM
+   * asks the user a question. Sends the question to the TUI channel
+   * and returns a Promise that resolves when the user answers via
+   * the /answer API endpoint.
+   */
+  async handleUserInput(
+    sessionId: string,
+    question: string,
+    choices?: string[],
+    allowFreeform?: boolean,
+  ): Promise<string> {
+    const channelKey = this.sessionChannels.get(sessionId);
+    const callback = channelKey ? this.activeCallbacks.get(channelKey) : undefined;
+
+    if (!channelKey || !callback) {
+      // No active channel — fallback answer so the conversation continues
+      const choiceList = choices ? ` (${choices.join(", ")})` : "";
+      return `The user cannot be reached right now. Question was: "${question}"${choiceList}`;
+    }
+
+    // Send question to the channel
+    callback(
+      JSON.stringify({ type: "question", question, choices, allowFreeform }),
+      false,
+    );
+
+    // Wait for the answer
+    return new Promise<string>((resolve) => {
+      this.pendingInput.set(channelKey, { resolve });
+      // Timeout after 5 minutes to avoid hanging forever
+      setTimeout(() => {
+        if (this.pendingInput.has(channelKey)) {
+          this.pendingInput.delete(channelKey);
+          resolve("(The user did not respond in time.)");
+        }
+      }, 5 * 60 * 1000);
+    });
+  }
+
+  /**
+   * Called by the /answer API endpoint when the TUI user responds to
+   * an ask_user question. Resolves the pending Promise in handleUserInput.
+   */
+  answerUserInput(channelKey: string, answer: string): boolean {
+    const pending = this.pendingInput.get(channelKey);
+    if (!pending) return false;
+    this.pendingInput.delete(channelKey);
+    pending.resolve(answer);
+    return true;
   }
 
   // ── Queue processing ────────────────────────────────────────
@@ -188,6 +248,10 @@ export class MessageHandler {
           console.log(`[message-handler] Prompt → session ${session.sessionId.slice(0, 8)}… ws=${workspaceName} dir=${workingDir ?? "cwd"} channel=${channelId}`);
           console.log(`[message-handler] Prompt text (${routed.text.length} chars): ${routed.text.slice(0, 200)}`);
 
+          // Store session→channel mapping so handleUserInput can find the right callback
+          this.sessionChannels.set(session.sessionId, channelId);
+          this.activeCallbacks.set(channelId, callback);
+
           // Debug: log all session events related to tools/permissions/errors
           const unsubDebug = session.on((event: any) => {
             const t = event?.type ?? "";
@@ -210,6 +274,8 @@ export class MessageHandler {
               unsubDelta();
               unsubIdle();
               unsubDebug();
+              this.sessionChannels.delete(session.sessionId);
+              this.activeCallbacks.delete(channelId);
               console.log(`[message-handler] Prompt response (${Date.now() - t0}ms, ${fullText.length} chars): ${fullText.slice(0, 300)}`);
               callback("", true);
               resolve(fullText);
@@ -219,6 +285,8 @@ export class MessageHandler {
               unsubDelta();
               unsubIdle();
               unsubDebug();
+              this.sessionChannels.delete(session.sessionId);
+              this.activeCallbacks.delete(channelId);
               console.error(`[message-handler] Prompt send failed: ${err instanceof Error ? err.message : String(err)}`);
               reject(err instanceof Error ? err : new Error(String(err)));
             });

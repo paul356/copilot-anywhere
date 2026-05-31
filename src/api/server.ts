@@ -121,11 +121,18 @@ app.post("/message", (req: Request, res: Response) => {
 
   _messageHandler.handle(result, channelKey, (text: string, done: boolean) => {
     const sseRes = sseClients.get(connectionId);
-    if (sseRes) {
-      sseRes.write(
-        `data: ${JSON.stringify({ type: done ? "message" : "delta", content: text })}\n\n`
-      );
+    if (!sseRes) return;
+
+    // User-input questions (ask_user) arrive as JSON — emit them directly
+    // as their native event type so the TUI renders them properly.
+    if (text.startsWith('{"type":"question"')) {
+      sseRes.write(`data: ${text}\n\n`);
+      return;
     }
+
+    sseRes.write(
+      `data: ${JSON.stringify({ type: done ? "message" : "delta", content: text })}\n\n`
+    );
   });
 
   res.json({ status: "queued" });
@@ -150,6 +157,29 @@ app.post("/cancel", async (req: Request, res: Response) => {
     );
   }
   res.json({ status: "ok", cancelled: true });
+});
+
+// Answer a pending ask_user question from the LLM.
+app.post("/answer", (req: Request, res: Response) => {
+  const { connectionId, answer } = req.body as { connectionId?: string; answer?: string };
+
+  if (!connectionId || typeof answer !== "string") {
+    res.status(400).json({ error: "Missing or invalid 'connectionId' / 'answer'" });
+    return;
+  }
+
+  if (!sseClients.has(connectionId)) {
+    res.status(400).json({ error: "Invalid 'connectionId'. Connect to /stream first." });
+    return;
+  }
+
+  if (!_messageHandler) {
+    res.status(503).json({ error: "Message handler not ready yet" });
+    return;
+  }
+
+  const ok = _messageHandler.answerUserInput(`tui:${connectionId}`, answer);
+  res.json({ ok });
 });
 
 // Get or switch model

@@ -1,4 +1,4 @@
-import { getClient, stopClient } from "./copilot-client.js";
+import { getClient, stopClient, setUserInputDelegate } from "./copilot-client.js";
 import { startApiServer } from "./api/server.js";
 import { createBot, startBot, stopBot, sendProactiveMessage } from "./telegram/bot.js";
 import {
@@ -154,6 +154,14 @@ async function main(): Promise<void> {
     },
   });
   console.log("[max] Message handler ready (pass-through mode)");
+
+  // Wire user-input delegation — when the LLM uses ask_user, the
+  // copilot-client's onUserInputRequest handler calls through to the
+  // message-handler which sends the question to the right channel.
+  setUserInputDelegate(
+    (sessionId: string, question: string, choices?: string[], allowFreeform?: boolean) =>
+      handler.handleUserInput(sessionId, question, choices, allowFreeform),
+  );
 
   // Capture for closures (TS doesn't narrow module-level variables through closures)
   const handler = messageHandler;

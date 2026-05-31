@@ -21,6 +21,36 @@ import {
   saveWorkspaceSessionId,
 } from "./store/db.js";
 
+// ── User Input Delegation ──────────────────────────────────────────
+// When the LLM uses ask_user, the SDK calls onUserInputRequest (an RPC
+// handler). We delegate to the message-handler which sends the question
+// to the appropriate channel (TUI / Feishu / Telegram) and waits for
+// the user's answer.
+
+type UserInputDelegate = (sessionId: string, question: string, choices?: string[], allowFreeform?: boolean) => Promise<string>;
+
+let userInputDelegate: UserInputDelegate | undefined;
+
+export function setUserInputDelegate(delegate: UserInputDelegate): void {
+  userInputDelegate = delegate;
+}
+
+function createUserInputHandler(): SessionConfig["onUserInputRequest"] {
+  if (!userInputDelegate) {
+    // Fallback: answer every question with a polite decline so the
+    // conversation doesn't hang forever. The delegate will be set
+    // once the daemon wires everything up.
+    return async () => ({
+      answer: "(The user is not available to answer questions right now.)",
+      wasFreeform: true,
+    });
+  }
+  return async (request: { question: string; choices?: string[]; allowFreeform?: boolean }, invocation: { sessionId: string }) => {
+    const answer = await userInputDelegate!(invocation.sessionId, request.question, request.choices, request.allowFreeform);
+    return { answer, wasFreeform: true };
+  };
+}
+
 let client: CopilotClient | undefined;
 
 export async function getClient(port: number): Promise<CopilotClient> {
@@ -120,6 +150,7 @@ export async function getOrCreateSession(
           configDir: wsRow.config_dir ?? SESSIONS_DIR,
           streaming: true,
           onPermissionRequest: loggingPermissionHandler,
+          onUserInputRequest: createUserInputHandler(),
           hooks: alwaysAllowHooks,
         };
         const providerConfig = getProviderConfig();
@@ -142,6 +173,7 @@ export async function getOrCreateSession(
     configDir: SESSIONS_DIR,
     streaming: true,
     onPermissionRequest: loggingPermissionHandler,
+    onUserInputRequest: createUserInputHandler(),
     hooks: alwaysAllowHooks,
   };
 
