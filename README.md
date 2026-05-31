@@ -1,160 +1,70 @@
-# Max
+# Copilot Anywhere (Max)
 
-AI orchestrator powered by [Copilot SDK](https://github.com/github/copilot-sdk) — control multiple Copilot CLI sessions from Telegram, Feishu, or a local terminal.
+Use GitHub Copilot from anywhere — Feishu, Telegram, or your terminal — all connected to the same Copilot session.
 
-## Highlights
+## Origin
 
-- **Always running** — persistent daemon, not a chat tab. Available from your terminal or your phone.
-- **Remembers like a person** — Max keeps a personal wiki at `~/.max/wiki/` that grows with every conversation. Per-entity pages (`people/burke.md`, `projects/myapp.md`) with frontmatter, tags, and `[[cross-links]]`. A relevance-ranked index is injected into context on every message, and Max writes daily conversation summaries on his own.
-- **Codes while you're away** — spins up real Copilot CLI worker sessions in any directory and reports back when they're done.
-- **Learns any skill** — pulls from [skills.sh](https://skills.sh) or builds new skills on demand.
-- **Your Copilot subscription** — works with any model your subscription includes (Claude, GPT, Gemini, …). Auto mode picks the right tier per message.
+This project is a fork of [burkeholland/max](https://github.com/burkeholland/max), heavily reworked. The original Max was an AI orchestrator for Telegram and TUI that used the Copilot SDK to manage multiple Worker sessions. We've:
 
-## Install
+- **Added Feishu support** — Feishu bot integration with the same unified message flow as Telegram and TUI
+- **Refactored to Pass-Through architecture** — replaced Worker/Orchestrator model with direct Copilot SDK Session streaming. Simpler, more stable, fewer moving parts.
+- **Added multi-workspace support** — each channel binds to its own working directory, managed via `/max:ws` commands
+- **Fixed numerous bugs** — duplicate Feishu replies, dual-path permission conflicts, TUI workspace persistence, model config being ignored, and more
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/burkeholland/max/main/install.sh | bash
-```
+## Channels
 
-Or install directly with npm:
-
-```bash
-npm install -g heymax
-```
-
-## Upgrading
-
-If you already have Max installed:
-
-```bash
-max update
-```
-
-Or manually: `npm install -g heymax@latest`. Your `~/.max/` config carries forward automatically — SQLite memories are migrated to wiki pages, bundled agents are synced (your customizations preserved), and no data is lost.
+| Channel  | Description |
+|----------|-------------|
+| Feishu   | Bot integration, supports P2P and group chats |
+| Telegram | Remote access via Telegram Bot |
+| TUI      | Local terminal UI (`max tui`) |
 
 ## Quick Start
 
-### 1. Run setup
-
 ```bash
-max setup
-```
+# Install
+npm install
+npm run build
 
-This creates `~/.max/` and walks you through configuration (Telegram bot token, Feishu app credentials, etc.). All chat channels are optional — you can use Max with just the terminal UI.
+# Optional: set model (defaults to claude-sonnet-4.6)
+export COPILOT_MODEL=deepseek-v4-pro
 
-### 2. Make sure Copilot CLI is authenticated
-
-```bash
-copilot login
-```
-
-### 3. Start Max
-
-```bash
+# Start the daemon
 max start
-```
 
-### 4. Connect from chat or terminal
-
-If you configured Telegram or Feishu/Lark during setup, start by messaging your bot there.
-
-Or connect via terminal in a separate shell:
-
-```bash
+# Connect via terminal
 max tui
 ```
 
-### 5. Talk to Max
+## Workspace Management
 
-From Telegram, Feishu/Lark, or the TUI, just send natural language:
-
-- "Start working on the auth bug in ~/dev/myapp"
-- "What sessions are running?"
-- "Check on the api-tests session"
-- "Kill the auth-fix session"
-- "What's the capital of France?"
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `max start` | Start the Max daemon |
-| `max tui` | Connect to the daemon via terminal |
-| `max setup` | Interactive first-run configuration |
-| `max update` | Check for and install updates |
-| `max help` | Show available commands |
-
-### Flags
-
-| Flag | Description |
-|------|-------------|
-| `--self-edit` | Allow Max to modify his own source code (use with `max start`) |
-
-### TUI commands
-
-| Command | Description |
-|---------|-------------|
-| `/model [name]` | Show or switch the current model |
-| `/memory` | Show the wiki index (everything Max has stored) |
-| `/skills` | List installed skills |
-| `/workers` | List active worker sessions |
-| `/copy` | Copy last response to clipboard |
-| `/status` | Daemon health check |
-| `/restart` | Restart the daemon |
-| `/cancel` | Cancel the current in-flight message |
-| `/clear` | Clear the screen |
-| `/help` | Show help |
-| `/quit` | Exit the TUI |
-| `Escape` | Cancel a running response |
-
-## How it Works
-
-Max runs a persistent **orchestrator Copilot session** — an always-on AI brain that receives your messages and decides how to handle them. For coding tasks, it spawns **worker Copilot sessions** in specific directories. For simple questions, it answers directly.
-
-You can talk to Max from:
-- **Telegram** — remote access from your phone (authenticated by user ID)
-- **Feishu / Lark** — same as Telegram, for users in mainland China (authenticated by `open_id`)
-- **TUI** — local terminal client (no auth needed)
-
-### Memory
-
-Max maintains a **personal wiki** at `~/.max/wiki/` instead of a flat list of memories. Knowledge is organized into per-entity markdown pages (e.g. `pages/people/burke.md`, `pages/projects/myapp.md`) with YAML frontmatter, tags, and `[[wiki links]]` between related pages.
-
-- **`remember`** — fuzzy-matches existing pages and merges new facts in instead of duplicating
-- **`recall`** / **`wiki_search`** / **`wiki_read`** — Max searches a ranked index first, then drills into specific pages
-- **`forget`** — line removal, section rewrite, or whole-page deletion
-- **Index-first context** — every message carries a relevance + recency-ranked table of contents of the wiki, so Max sees what he knows without force-feeding stale page bodies into every prompt
-- **Episodic memory** — after long enough conversations, Max writes a daily summary to `pages/conversations/YYYY-MM-DD.md` asynchronously, never blocking your reply
-- **Migration** — older SQLite-based memories are migrated and reorganized into entity pages on first launch; originals are archived to `sources/migrated-archive/`
+```
+/max:ws list                 List all workspaces
+/max:ws new <name> <path>   Create a workspace
+/max:ws switch <name>       Switch active workspace
+/max:ws delete <name>       Delete a workspace
+```
 
 ## Architecture
 
 ```
-Telegram ─┐
-Feishu ───┼──→ Max Daemon ←── TUI
-                   │         │
-                   └─ chat   Orchestrator Session (Copilot SDK)
-                                                  │
-                               ┌─────────┼─────────┐
-                         Worker 1  Worker 2  Worker N
+Feishu / Telegram / TUI
+         │
+     route() — unified routing
+         │
+  MessageHandler.handle()
+         │
+    ┌────┼────┐
+    │    │    │
+  Max  CLI   Copilot
+  cmds cmds  Session
+               │
+          Copilot SDK
 ```
-
-- **Daemon** (`max start`) — persistent service running Copilot SDK + Telegram bot + Feishu/Lark bot + HTTP API
-- **TUI** (`max tui`) — lightweight terminal client connecting to the daemon
-- **Orchestrator** — long-running Copilot session with custom tools for session management
-- **Workers** — child Copilot sessions for specific coding tasks
 
 ## Development
 
 ```bash
-# Clone and install
-git clone https://github.com/burkeholland/max.git
-cd max
-npm install
-
-# Watch mode
-npm run dev
-
-# Build TypeScript
-npm run build
+npm run dev    # watch mode
+npm run build  # compile TypeScript
 ```
