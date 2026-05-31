@@ -6,12 +6,13 @@ import { ensureWikiStructure } from "../wiki/fs.js";
 import { listSkills } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
-import { handleWorkspace } from "../commands.js";
+import { route, executeMaxCommand } from "../command-router.js";
+import { getActiveWorkspace } from "../store/db.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFile, unlink } from "fs/promises";
 import { MessageHandler } from "../message-handler.js";
-import { route } from "../command-router.js";
+
 
 let bot: Bot | undefined;
 
@@ -222,8 +223,15 @@ export function createBot(messageHandler: MessageHandler): Bot {
   bot.command("ws", async (ctx) => {
     const arg = ctx.match?.trim();
     const channelKey = `telegram:${ctx.chat.id}`;
-    const reply = await handleWorkspace(arg, channelKey);
-    await safeReply(ctx, reply);
+    const parts = (arg ?? "").trim().split(/\s+/).filter(Boolean);
+    const sub = parts[0]?.toLowerCase() ?? "list";
+    const args = sub === "list" ? ["list"] : parts.slice(1);
+    const result = await executeMaxCommand("ws", [sub, ...args], {
+      senderId: channelKey,
+      activeWorkspace: getActiveWorkspace(channelKey),
+      channelKey,
+    });
+    await safeReply(ctx, result.reply);
   });
 
   // Handle all text messages
