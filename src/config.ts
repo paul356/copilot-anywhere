@@ -17,6 +17,7 @@ const configSchema = z.object({
   FEISHU_APP_SECRET: z.string().min(1).optional(),
   FEISHU_AUTHORIZED_OPEN_ID: z.string().min(1).optional(),
   FEISHU_DOMAIN: z.enum(["feishu", "lark"]).optional(),
+  COPILOT_UI_SERVER_PORT: z.string().optional(),
 });
 
 const raw = configSchema.parse(process.env);
@@ -55,6 +56,9 @@ export const config = {
   feishuAppSecret: raw.FEISHU_APP_SECRET,
   feishuAuthorizedOpenId: raw.FEISHU_AUTHORIZED_OPEN_ID,
   feishuDomain: raw.FEISHU_DOMAIN ?? "feishu",
+  get copilotUiServerPort(): number {
+    return parseInt(raw.COPILOT_UI_SERVER_PORT || "9999", 10);
+  },
   get copilotModel(): string {
     return _copilotModel;
   },

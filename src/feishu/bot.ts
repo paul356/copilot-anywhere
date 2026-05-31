@@ -1,19 +1,7 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { config } from "../config.js";
-import { sendToOrchestrator, getLastRouteResult } from "../copilot/orchestrator.js";
-import { restartDaemon } from "../daemon.js";
-import {
-  HELP_TEXT,
-  START_TEXT,
-  handleAgents,
-  handleAuto,
-  handleCancel,
-  handleMemory,
-  handleModel,
-  handleModels,
-  handleSkills,
-  handleWorkspace,
-} from "../commands.js";
+import { route, RoutedMessage, executeMaxCommand, CommandResult } from "../command-router.js";
+import { MessageHandler } from "../message-handler.js";
 import { buildCardContent, buildTextContent, chunkMessage } from "./formatter.js";
 
 let client: Lark.Client | undefined;
@@ -56,47 +44,44 @@ type MessageReceiveEvent = {
   };
 };
 
-/** Maybe-handle a slash command. Returns the reply text, or null if not a command. */
-async function maybeHandleCommand(text: string, chatIdForCommands: string): Promise<string | null> {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("/")) return null;
+/** Route and process a message through the unified message handler.
+ *  Handles all routed types: max-command, cli-command, prompt. */
+async function processMessage(
+  text: string,
+  openId: string,
+  messageHandler: MessageHandler,
+): Promise<string> {
+  const channelKey = `feishu:${openId}`;
+  const result = route(text, { senderId: openId, channelKey });
 
-  const [cmdRaw, ...rest] = trimmed.slice(1).split(/\s+/);
-  const cmd = cmdRaw.toLowerCase();
-  const arg = rest.join(" ");
+  const chunks: string[] = [];
+  await messageHandler.handle(result, channelKey, (responseText: string, done: boolean) => {
+    if (responseText) chunks.push(responseText);
+  });
 
-  switch (cmd) {
-    case "start":
-      return START_TEXT;
-    case "help":
-      return HELP_TEXT;
-    case "cancel":
-      return await handleCancel(`feishu:${chatIdForCommands}`);
-    case "model":
-      return await handleModel(arg);
-    case "models":
-      return await handleModels();
-    case "memory":
-      return handleMemory();
-    case "skills":
-      return handleSkills();
-    case "workers":
-    case "agents":
-      return handleAgents();
-    case "auto":
-      return handleAuto();
-    case "ws":
-      return await handleWorkspace(arg, `feishu:${chatIdForCommands}`);
-    case "restart":
-      setTimeout(() => {
-        restartDaemon().catch((err) => {
-          console.error("[max] Restart failed:", err);
-        });
-      }, 500);
-      return "⏳ Restarting Max...";
-    default:
-      return null;
+  const fullText = chunks.join("");
+  console.log(`[feishu] processMessage → ${fullText.length} chars (type=${result.type}, sender=${openId})`);
+  return fullText;
+}
+
+// ── Deduplication ─────────────────────────────────────────────────
+
+const RECENT_MESSAGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const recentMessages = new Map<string, number>(); // message_id → timestamp
+
+/** Returns true if this message_id was already processed recently. */
+function isDuplicate(messageId: string): boolean {
+  const cutoff = Date.now() - RECENT_MESSAGE_TTL_MS;
+  // Purge expired entries
+  for (const [id, ts] of recentMessages) {
+    if (ts < cutoff) recentMessages.delete(id);
   }
+  if (recentMessages.has(messageId)) {
+    console.log(`[feishu] Skipping duplicate message ${messageId}`);
+    return true;
+  }
+  recentMessages.set(messageId, Date.now());
+  return false;
 }
 
 async function sendChunkedReply(
@@ -159,7 +144,7 @@ function isWithdrawnReplyError(err: unknown): boolean {
   return response?.data?.code === 230011 || response?.data?.code === 231003;
 }
 
-export function createBot(): { client: Lark.Client; wsClient: Lark.WSClient } {
+export function createBot(messageHandler: MessageHandler): { client: Lark.Client; wsClient: Lark.WSClient } {
   if (!config.feishuAppId || !config.feishuAppSecret) {
     throw new Error(
       "Feishu credentials are missing. Run 'max setup' and enter your Feishu App ID and App Secret."
@@ -216,35 +201,18 @@ export function createBot(): { client: Lark.Client; wsClient: Lark.WSClient } {
       const text = stripMentions(rawText);
       if (!text) return;
 
-      // Slash command short-circuit.
-      const cmdReply = await maybeHandleCommand(text, event.message.chat_id);
-      if (cmdReply !== null) {
-        await sendChunkedReply(event.message.message_id, event.message.chat_id, cmdReply);
-        return;
-      }
+      // Skip duplicate messages (Feishu retries events if handler takes >3s)
+      if (isDuplicate(event.message.message_id)) return;
 
-      // Otherwise, hand off to the orchestrator.
-      sendToOrchestrator(
-        text,
-        {
-          type: "feishu",
-          chatId: event.message.chat_id,
-          messageId: event.message.message_id,
-          openId: senderOpenId,
-        },
-        (responseText: string, done: boolean) => {
-          if (!done) return;
-          void (async () => {
-            const routeResult = getLastRouteResult();
-            const suffix =
-              routeResult && routeResult.routerMode === "auto"
-                ? `\n\n_⚡ auto · ${routeResult.model}_`
-                : "";
-            const final = responseText + suffix;
-            await sendChunkedReply(event.message.message_id, event.message.chat_id, final);
-          })();
-        }
-      );
+      // Route and process through unified message handler
+      const fullText = await processMessage(text, senderOpenId, messageHandler);
+
+      if (fullText.length > 0) {
+        const truncated = fullText.length > 20_000
+          ? fullText.slice(0, 20_000) + "\n\n_(响应过长，已截断)_"
+          : fullText;
+        await sendChunkedReply(event.message.message_id, event.message.chat_id, truncated);
+      }
     },
   });
 

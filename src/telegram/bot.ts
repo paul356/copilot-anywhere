@@ -1,6 +1,5 @@
 import { Bot, type Context } from "grammy";
 import { config, persistModel } from "../config.js";
-import { sendToOrchestrator, cancelCurrentMessage, getAgentInfo, getLastRouteResult } from "../copilot/orchestrator.js";
 import { chunkMessage, toTelegramMarkdown } from "./formatter.js";
 import { parseIndex } from "../wiki/index-manager.js";
 import { ensureWikiStructure } from "../wiki/fs.js";
@@ -11,6 +10,8 @@ import { handleWorkspace } from "../commands.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFile, unlink } from "fs/promises";
+import { MessageHandler } from "../message-handler.js";
+import { route } from "../command-router.js";
 
 let bot: Bot | undefined;
 
@@ -77,7 +78,7 @@ async function cleanupAttachments(
   }
 }
 
-export function createBot(): Bot {
+export function createBot(messageHandler: MessageHandler): Bot {
   if (!config.telegramBotToken) {
     throw new Error("Telegram bot token is missing. Run 'max setup' and enter the bot token from @BotFather.");
   }
@@ -124,8 +125,8 @@ export function createBot(): Bot {
     )
   );
   bot.command("cancel", async (ctx) => {
-    const cancelled = await cancelCurrentMessage(`telegram:${ctx.chat.id}`);
-    await ctx.reply(cancelled ? "⛔ Cancelled." : "Nothing to cancel.");
+    messageHandler.cancelChannel(`telegram:${ctx.chat.id}`);
+    await ctx.reply("⛔ Cancelled.");
   });
   bot.command("model", async (ctx) => {
     const arg = ctx.match?.trim();
@@ -197,15 +198,7 @@ export function createBot(): Bot {
     }
   });
   const agentCommandHandler = async (ctx: Context) => {
-    const workers = getAgentInfo();
-    if (workers.length === 0) {
-      await ctx.reply("No workers running.");
-    } else {
-      const lines = workers.map((w) => {
-        return `🟢 @${w.slug} (${w.model}) — ${w.description}`;
-      });
-      await safeReply(ctx, lines.join("\n"));
-    }
+    await ctx.reply("No workers running. (pass-through mode)");
   };
   bot.command("agents", agentCommandHandler);
   bot.command("workers", agentCommandHandler);
@@ -260,53 +253,41 @@ export function createBot(): Bot {
 
     startTyping();
 
-    sendToOrchestrator(
-      prompt,
-      { type: "telegram", chatId, messageId: userMessageId },
-      (text: string, done: boolean) => {
-        if (done) {
-          stopTyping();
-          void cleanupAttachments(replyAttachments);
-          // Send final message — use chunking for long responses, reply-quote original
-          void (async () => {
-            // Append model indicator
-            const routeResult = getLastRouteResult();
-            let indicatorSuffix = "";
-            if (routeResult && routeResult.routerMode === "auto") {
-              indicatorSuffix = `\n\n_⚡ auto · ${routeResult.model}_`;
+    const channelKey = `telegram:${chatId}`;
+    const result = route(prompt, { senderId: channelKey, channelKey });
+
+    messageHandler.handle(result, channelKey, (text: string, done: boolean) => {
+      if (done) {
+        stopTyping();
+        void cleanupAttachments(replyAttachments);
+        void (async () => {
+          const formatted = toTelegramMarkdown(text);
+          const chunks = chunkMessage(formatted);
+          const fallbackChunks = chunkMessage(text);
+          const sendChunk = async (chunk: string, fallback: string, isFirst: boolean) => {
+            const opts = isFirst
+              ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
+              : { parse_mode: "MarkdownV2" as const };
+            await ctx.reply(chunk, opts).catch(
+              () => ctx.reply(fallback, isFirst ? { reply_parameters: replyParams } : {})
+            );
+          };
+          try {
+            for (let i = 0; i < chunks.length; i++) {
+              await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0);
             }
-            const formatted = toTelegramMarkdown(text) + indicatorSuffix;
-            const chunks = chunkMessage(formatted);
-            const fallbackText = routeResult && routeResult.routerMode === "auto"
-              ? text + `\n\n⚡ auto · ${routeResult.model}`
-              : text;
-            const fallbackChunks = chunkMessage(fallbackText);
-            const sendChunk = async (chunk: string, fallback: string, isFirst: boolean) => {
-              const opts = isFirst
-                ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
-                : { parse_mode: "MarkdownV2" as const };
-              await ctx.reply(chunk, opts).catch(
-                () => ctx.reply(fallback, isFirst ? { reply_parameters: replyParams } : {})
-              );
-            };
+          } catch {
             try {
-              for (let i = 0; i < chunks.length; i++) {
-                await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0);
+              for (let i = 0; i < fallbackChunks.length; i++) {
+                await ctx.reply(fallbackChunks[i], i === 0 ? { reply_parameters: replyParams } : {});
               }
             } catch {
-              try {
-                for (let i = 0; i < fallbackChunks.length; i++) {
-                  await ctx.reply(fallbackChunks[i], i === 0 ? { reply_parameters: replyParams } : {});
-                }
-              } catch {
-                // Nothing more we can do
-              }
+              // Nothing more we can do
             }
-          })();
-        }
-      },
-      replyAttachments.length > 0 ? replyAttachments : undefined
-    );
+          }
+        })();
+      }
+    });
   });
 
   // Handle photo messages (with optional caption and optional reply context)
@@ -320,19 +301,11 @@ export function createBot(): Bot {
     const largest = photos[photos.length - 1];
     const photoPath = await downloadTelegramPhoto(largest.file_id, "photo");
 
-    const attachments: Array<{ type: "file"; path: string; displayName?: string }> = [];
-    if (photoPath) {
-      attachments.push({ type: "file", path: photoPath, displayName: "image" });
-    }
-
     // Build reply context if this is a reply
     const { prefix: replyPrefix, attachments: replyAttachments } = await buildReplyContext(ctx.message.reply_to_message);
-    attachments.push(...replyAttachments);
 
     const caption = ctx.message.caption ?? "";
     const prompt = replyPrefix + (caption || "[Image attached]");
-
-    const allAttachments = attachments.length > 0 ? attachments : undefined;
 
     // Show "typing..." indicator
     let typingInterval: ReturnType<typeof setInterval> | undefined;
@@ -351,51 +324,42 @@ export function createBot(): Bot {
 
     startTyping();
 
-    sendToOrchestrator(
-      prompt,
-      { type: "telegram", chatId, messageId: userMessageId },
-      (text: string, done: boolean) => {
-        if (done) {
-          stopTyping();
-          void cleanupAttachments(attachments);
-          void (async () => {
-            const routeResult = getLastRouteResult();
-            let indicatorSuffix = "";
-            if (routeResult && routeResult.routerMode === "auto") {
-              indicatorSuffix = `\n\n_⚡ auto · ${routeResult.model}_`;
+    const channelKey = `telegram:${chatId}`;
+    const result = route(prompt, { senderId: channelKey, channelKey });
+
+    messageHandler.handle(result, channelKey, (text: string, done: boolean) => {
+      if (done) {
+        stopTyping();
+        void cleanupAttachments(replyAttachments);
+        if (photoPath) void unlink(photoPath).catch(() => {});
+        void (async () => {
+          const formatted = toTelegramMarkdown(text);
+          const chunks = chunkMessage(formatted);
+          const fallbackChunks = chunkMessage(text);
+          const sendChunk = async (chunk: string, fallback: string, isFirst: boolean) => {
+            const opts = isFirst
+              ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
+              : { parse_mode: "MarkdownV2" as const };
+            await ctx.reply(chunk, opts).catch(
+              () => ctx.reply(fallback, isFirst ? { reply_parameters: replyParams } : {})
+            );
+          };
+          try {
+            for (let i = 0; i < chunks.length; i++) {
+              await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0);
             }
-            const formatted = toTelegramMarkdown(text) + indicatorSuffix;
-            const chunks = chunkMessage(formatted);
-            const fallbackText = routeResult && routeResult.routerMode === "auto"
-              ? text + `\n\n⚡ auto · ${routeResult.model}`
-              : text;
-            const fallbackChunks = chunkMessage(fallbackText);
-            const sendChunk = async (chunk: string, fallback: string, isFirst: boolean) => {
-              const opts = isFirst
-                ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
-                : { parse_mode: "MarkdownV2" as const };
-              await ctx.reply(chunk, opts).catch(
-                () => ctx.reply(fallback, isFirst ? { reply_parameters: replyParams } : {})
-              );
-            };
+          } catch {
             try {
-              for (let i = 0; i < chunks.length; i++) {
-                await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0);
+              for (let i = 0; i < fallbackChunks.length; i++) {
+                await ctx.reply(fallbackChunks[i], i === 0 ? { reply_parameters: replyParams } : {});
               }
             } catch {
-              try {
-                for (let i = 0; i < fallbackChunks.length; i++) {
-                  await ctx.reply(fallbackChunks[i], i === 0 ? { reply_parameters: replyParams } : {});
-                }
-              } catch {
-                // Nothing more we can do
-              }
+              // Nothing more we can do
             }
-          })();
-        }
-      },
-      allAttachments
-    );
+          }
+        })();
+      }
+    });
   });
 
   return bot;

@@ -1044,7 +1044,7 @@ setTimeout(() => {
       return;
     }
 
-    // Send to orchestrator
+    // Send message to daemon
     activeRequestId += 1;
     activeRequestStartedAt = Date.now();
     debugLog("request-dispatch", {

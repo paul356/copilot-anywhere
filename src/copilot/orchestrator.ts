@@ -3,6 +3,7 @@ import { approveAll, type CopilotClient, type CopilotSession } from "@github/cop
 import { createTools, type ToolDeps } from "./tools.js";
 import { getOrchestratorSystemMessage } from "./system-message.js";
 import { config, DEFAULT_MODEL } from "../config.js";
+import { getProviderConfig } from "../copilot-client.js";
 import { loadMcpConfig } from "./mcp-config.js";
 import { getSkillDirectories } from "./skills.js";
 import { resetClient } from "./client.js";
@@ -294,6 +295,11 @@ async function createOrResumeWorkspaceSession(wsName: string, workingDir?: strin
     infiniteSessions,
   };
 
+  const providerConfig = getProviderConfig();
+  if (providerConfig) {
+    (sessionParams as Record<string, unknown>).provider = providerConfig;
+  }
+
   if (savedSessionId) {
     try {
       console.log(`[max] Resuming session for workspace '${wsName}' (${savedSessionId.slice(0, 8)}…, configDir: ${resolvedConfigDir})`);
@@ -315,7 +321,7 @@ async function createOrResumeWorkspaceSession(wsName: string, workingDir?: strin
       } else {
         deleteState(dbKey);
       }
-      throw err;
+      // Don't throw — fall through to create a new session below
     }
   }
 
@@ -354,11 +360,14 @@ export async function initOrchestrator(client: CopilotClient): Promise<void> {
   console.log(`[max] Loaded ${agents.length} agent(s): ${agents.map((a) => `@${a.slug}`).join(", ") || "(none)"}`);
 
   // Validate configured model against available models
+  // Skip validation if using a custom provider (BYOK) — the model list
+  // only contains official Copilot models, not custom provider ones.
   try {
     const models = await client.listModels();
     const configured = config.copilotModel;
-    const isAvailable = models.some((m) => m.id === configured);
-    if (!isAvailable) {
+    const isCustomProvider = !!process.env.COPILOT_PROVIDER_TYPE && !!process.env.COPILOT_PROVIDER_API_KEY;
+    
+    if (!isCustomProvider && !models.some((m) => m.id === configured)) {
       console.log(`[max] ⚠️ Configured model '${configured}' is not available. Falling back to '${DEFAULT_MODEL}'.`);
       config.copilotModel = DEFAULT_MODEL;
     }
@@ -371,12 +380,10 @@ export async function initOrchestrator(client: CopilotClient): Promise<void> {
   console.log(`[max] Persistent session mode — conversation history maintained by SDK`);
   startHealthCheck();
 
-  // Eagerly create/resume the default workspace session
-  try {
-    await ensureWorkspaceSession("default");
-  } catch (err) {
-    console.error(`[max] Failed to create initial session (will retry on first message):`, err instanceof Error ? err.message : err);
-  }
+  // Skip eager session creation — sessions are created on-demand by
+  // message-handler (Feishu) or per-channel as messages arrive (Telegram/TUI).
+  // The orchestrator's own session path is kept for backward compat but not
+  // eagerly initialized at startup.
 }
 
 /** How long to wait for the orchestrator to finish a turn (10 min). */

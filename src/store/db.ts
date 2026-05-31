@@ -248,14 +248,22 @@ export function clearWorkspaceSessionId(name: string): void {
   db.prepare(`UPDATE worker_sessions SET copilot_session_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE name = ?`).run(name);
 }
 
+/** Map per-connection TUI keys (tui:tui-1, tui:tui-2) to a single stable key
+ *  so workspace preferences survive SSE reconnects.
+ *  Feishu and other channels pass through unchanged so each user is isolated. */
+function normalizeChannelKey(channelKey: string): string {
+  if (channelKey.startsWith("tui:")) return "tui:main";
+  return channelKey;
+}
+
 /** Get the active workspace name for a channel key (e.g. "telegram:123"). Returns "default" if not set. */
 export function getActiveWorkspace(channelKey: string): string {
-  return getState(`active_ws:${channelKey}`) ?? "default";
+  return getState(`active_ws:${normalizeChannelKey(channelKey)}`) ?? "default";
 }
 
 /** Set the active workspace for a channel key. */
 export function setActiveWorkspace(channelKey: string, name: string): void {
-  setState(`active_ws:${channelKey}`, name);
+  setState(`active_ws:${normalizeChannelKey(channelKey)}`, name);
 }
 
 export function closeDb(): void {
