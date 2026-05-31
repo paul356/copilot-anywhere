@@ -1,24 +1,62 @@
-import { getClient, stopClient } from "./copilot/client.js";
-import { initOrchestrator, setMessageLogger, setProactiveNotify, getAgentInfo, shutdownAgents } from "./copilot/orchestrator.js";
-import { startApiServer, broadcastToSSE } from "./api/server.js";
+import { getClient, stopClient } from "./copilot-client.js";
+import { startApiServer } from "./api/server.js";
 import { createBot, startBot, stopBot, sendProactiveMessage } from "./telegram/bot.js";
-import { getDb, closeDb, getState } from "./store/db.js";
+import {
+  createBot as createFeishuBot,
+  startBot as startFeishuBot,
+  stopBot as stopFeishuBot,
+  sendProactiveMessage as sendFeishuProactiveMessage,
+} from "./feishu/bot.js";
+import { getDb, closeDb } from "./store/db.js";
 import { config } from "./config.js";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import { readdirSync, statSync, rmSync } from "fs";
 import { join } from "path";
 import { checkForUpdate } from "./update.js";
 import { ensureWikiStructure } from "./wiki/fs.js";
 import { shouldMigrate, migrateMemoriesToWiki, shouldReorganize, reorganizeWiki } from "./wiki/migrate.js";
 import { SESSIONS_DIR } from "./paths.js";
+import { CLIProcess } from "./cli-process.js";
+import { MessageHandler } from "./message-handler.js";
+import { getWorkspace, getActiveWorkspace } from "./store/db.js";
+import { getOrCreateSession } from "./copilot-client.js";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Remove orphaned session folders older than 7 days, preserving the current session. */
+let cliProcess: CLIProcess | undefined;
+let messageHandler: MessageHandler | undefined;
+
+/** Kill any process already listening on our copilot port (stale from a crashed/restarted daemon). */
+async function killStaleCopilotOnPort(port: number): Promise<void> {
+  try {
+    // Find PID of process listening on our port
+    const result = execSync(`fuser ${port}/tcp 2>/dev/null || true`, {
+      timeout: 3000,
+      encoding: "utf-8",
+    }).trim();
+    if (!result) {
+      console.log(`[max] Port ${port} is free`);
+      return;
+    }
+    // fuser output is like "9999/tcp: 12345" — extract PID
+    const pidMatch = result.match(/(\d+)$/);
+    if (!pidMatch) return;
+    const pid = parseInt(pidMatch[1], 10);
+    console.log(`[max] Port ${port} held by PID ${pid} — killing stale copilot...`);
+    try { process.kill(pid, "SIGTERM"); } catch {}
+    // Wait a moment then force kill if still alive
+    await new Promise((r) => setTimeout(r, 500));
+    try { process.kill(pid, "SIGKILL"); } catch {}
+    console.log(`[max] Stale copilot (PID ${pid}) killed`);
+  } catch {
+    // best effort — if the port is free, start() will succeed
+  }
+}
+
+/** Remove orphaned session folders older than 7 days. */
 function pruneOldSessions(): void {
   try {
     const sessionStateDir = join(SESSIONS_DIR, "session-state");
-    const currentSessionId = getState("orchestrator_session_id");
 
     let entries: string[];
     try {
@@ -31,8 +69,6 @@ function pruneOldSessions(): void {
     let pruned = 0;
 
     for (const entry of entries) {
-      if (entry === currentSessionId) continue;
-
       const fullPath = join(sessionStateDir, entry);
       try {
         const stat = statSync(fullPath);
@@ -53,23 +89,14 @@ function pruneOldSessions(): void {
   }
 }
 
-function truncate(text: string, max = 200): string {
-  const oneLine = text.replace(/\n/g, " ").trim();
-  return oneLine.length > max ? oneLine.slice(0, max) + "…" : oneLine;
-}
-
 async function main(): Promise<void> {
   console.log("[max] Starting Max daemon...");
   if (config.selfEditEnabled) {
     console.log("[max] ⚠ Self-edit mode enabled — Max can modify his own source code");
   }
 
-  // Set up message logging to daemon console
-  setMessageLogger((direction, source, text) => {
-    const arrow = direction === "in" ? "⟶" : "⟵";
-    const tag = source.padEnd(8);
-    console.log(`[max] ${tag} ${arrow}  ${truncate(text)}`);
-  });
+  // Set up logging
+  console.log("[max] Message logger ready");
 
   // Initialize SQLite
   getDb();
@@ -94,33 +121,54 @@ async function main(): Promise<void> {
   // Prune orphaned session folders older than 7 days
   pruneOldSessions();
 
-  // Start Copilot SDK client
+  // Kill any stale copilot process on our port (from a previous run)
+  await killStaleCopilotOnPort(config.copilotUiServerPort);
+
+  // Start Copilot CLI in --ui-server mode
+  console.log("[max] Starting Copilot CLI (--ui-server)...");
+  cliProcess = new CLIProcess({
+    port: config.copilotUiServerPort,
+  });
+  await cliProcess.start();
+  console.log("[max] Copilot CLI ready on port", config.copilotUiServerPort);
+
+  // Start Copilot SDK client (connects to --ui-server)
   console.log("[max] Starting Copilot SDK client...");
-  const client = await getClient();
+  await getClient(config.copilotUiServerPort);
   console.log("[max] Copilot SDK client ready");
 
-  // Initialize orchestrator session
-  console.log("[max] Creating orchestrator session...");
-  await initOrchestrator(client);
-  console.log("[max] Orchestrator session ready");
-
-  // Wire up proactive notifications — route to the originating channel
-  setProactiveNotify((text, channel) => {
-    console.log(`[max] bg-notify (${channel ?? "all"}) ⟵  ${truncate(text)}`);
-    if (!channel || channel === "telegram") {
-      if (config.telegramEnabled) sendProactiveMessage(text);
-    }
-    if (!channel || channel === "tui") {
-      broadcastToSSE(text);
-    }
+  // Create unified message handler — all channels (Feishu, TUI, Telegram)
+  // share the same session-per-channel pass-through model.
+  messageHandler = new MessageHandler({
+    port: config.copilotUiServerPort,
+    cliProcess,
+    async getSessionForChannel(channelId: string) {
+      const wsName = getActiveWorkspace(channelId);
+      const wsRow = getWorkspace(wsName);
+      const workingDir = wsRow?.working_dir;
+      const session = await getOrCreateSession(wsName, config.copilotUiServerPort, {
+        workingDirectory: workingDir,
+        model: config.copilotModel,
+      });
+      return { session, workspaceName: wsName, workingDir };
+    },
   });
+  console.log("[max] Message handler ready (pass-through mode)");
+
+  // Capture for closures (TS doesn't narrow module-level variables through closures)
+  const handler = messageHandler;
+
+  // Wire up to API server (same pass-through flow as Feishu)
+  const { setMessageHandler, setCancelChannel } = await import("./api/server.js");
+  setMessageHandler(handler);
+  setCancelChannel((channelId: string) => handler.cancelChannel(channelId));
 
   // Start HTTP API for TUI
   await startApiServer();
 
   // Start Telegram bot (if configured)
   if (config.telegramEnabled) {
-    createBot();
+    createBot(handler);
     await startBot();
   } else if (!config.telegramBotToken && config.authorizedUserId === undefined) {
     console.log("[max] Telegram not configured — skipping bot. Run 'max setup' to configure.");
@@ -128,6 +176,16 @@ async function main(): Promise<void> {
     console.log("[max] Telegram bot token missing — skipping bot. Run 'max setup' and enter your bot token.");
   } else {
     console.log("[max] Telegram user ID missing — skipping bot. Run 'max setup' and enter your Telegram user ID (get it from @userinfobot).");
+  }
+
+  // Start Feishu bot (if configured)
+  if (config.feishuEnabled) {
+    createFeishuBot(messageHandler);
+    await startFeishuBot();
+  } else if (!config.feishuAppId && !config.feishuAppSecret && !config.feishuAuthorizedOpenId) {
+    console.log("[max] Feishu not configured — skipping bot. Run 'max setup' to configure.");
+  } else {
+    console.log("[max] Feishu config incomplete — skipping bot. Run 'max setup' and provide App ID, App Secret, and authorized open_id.");
   }
 
   console.log("[max] Max is fully operational.");
@@ -142,8 +200,13 @@ async function main(): Promise<void> {
     .catch(() => {});  // silent — network may be unavailable
 
   // Notify user if this is a restart (not a fresh start)
-  if (config.telegramEnabled && process.env.MAX_RESTARTED === "1") {
-    await sendProactiveMessage("I'm back online 🟢").catch(() => {});
+  if (process.env.MAX_RESTARTED === "1") {
+    if (config.telegramEnabled) {
+      await sendProactiveMessage("I'm back online 🟢").catch(() => {});
+    }
+    if (config.feishuEnabled) {
+      await sendFeishuProactiveMessage("I'm back online 🟢").catch(() => {});
+    }
     delete process.env.MAX_RESTARTED;
   }
 }
@@ -156,16 +219,7 @@ async function shutdown(): Promise<void> {
     process.exit(1);
   }
 
-  // Check for running workers before shutting down
-  const workers = getAgentInfo();
-
-  if (workers.length > 0 && shutdownState === "idle") {
-    const names = workers.map(w => `@${w.slug}`).join(", ");
-    console.log(`\n[max] ⚠ ${workers.length} running worker(s) will be stopped: ${names}`);
-    console.log("[max] Press Ctrl+C again to shut down, or wait for workers to finish.");
-    shutdownState = "warned";
-    return;
-  }
+  // Check for running workers before shutting down (pass-through mode — no workers)
 
   shutdownState = "shutting_down";
   console.log("\n[max] Shutting down... (Ctrl+C again to force)");
@@ -180,10 +234,12 @@ async function shutdown(): Promise<void> {
   if (config.telegramEnabled) {
     try { await stopBot(); } catch { /* best effort */ }
   }
+  if (config.feishuEnabled) {
+    try { await stopFeishuBot(); } catch { /* best effort */ }
+  }
 
-  // Destroy all active agent sessions
-  await shutdownAgents();
-
+  messageHandler?.cancelAll();
+  try { await cliProcess?.stop(); } catch { /* best effort */ }
   try { await stopClient(); } catch { /* best effort */ }
   closeDb();
   console.log("[max] Goodbye.");
@@ -194,19 +250,19 @@ async function shutdown(): Promise<void> {
 export async function restartDaemon(): Promise<void> {
   console.log("[max] Restarting...");
 
-  const workers = getAgentInfo();
-  if (workers.length > 0) {
-    console.log(`[max] ⚠ Stopping ${workers.length} running worker(s) for restart`);
-  }
-
   if (config.telegramEnabled) {
     await sendProactiveMessage("Restarting — back in a sec ⏳").catch(() => {});
     try { await stopBot(); } catch { /* best effort */ }
   }
+  if (config.feishuEnabled) {
+    await sendFeishuProactiveMessage("Restarting — back in a sec ⏳").catch(() => {});
+    try { await stopFeishuBot(); } catch { /* best effort */ }
+  }
 
-  // Destroy all active agent sessions
-  await shutdownAgents();
+  // Cancel all in-flight message processing
+  messageHandler?.cancelAll();
 
+  try { await cliProcess?.stop(); } catch { /* best effort */ }
   try { await stopClient(); } catch { /* best effort */ }
   closeDb();
 

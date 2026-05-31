@@ -13,6 +13,11 @@ const configSchema = z.object({
   API_PORT: z.string().optional(),
   COPILOT_MODEL: z.string().optional(),
   WORKER_TIMEOUT: z.string().optional(),
+  FEISHU_APP_ID: z.string().min(1).optional(),
+  FEISHU_APP_SECRET: z.string().min(1).optional(),
+  FEISHU_AUTHORIZED_OPEN_ID: z.string().min(1).optional(),
+  FEISHU_DOMAIN: z.enum(["feishu", "lark"]).optional(),
+  COPILOT_UI_SERVER_PORT: z.string().optional(),
 });
 
 const raw = configSchema.parse(process.env);
@@ -47,6 +52,13 @@ export const config = {
   authorizedUserId: parsedUserId,
   apiPort: parsedPort,
   workerTimeoutMs: parsedWorkerTimeout,
+  feishuAppId: raw.FEISHU_APP_ID,
+  feishuAppSecret: raw.FEISHU_APP_SECRET,
+  feishuAuthorizedOpenId: raw.FEISHU_AUTHORIZED_OPEN_ID,
+  feishuDomain: raw.FEISHU_DOMAIN ?? "feishu",
+  get copilotUiServerPort(): number {
+    return parseInt(raw.COPILOT_UI_SERVER_PORT || "9999", 10);
+  },
   get copilotModel(): string {
     return _copilotModel;
   },
@@ -55,6 +67,9 @@ export const config = {
   },
   get telegramEnabled(): boolean {
     return !!this.telegramBotToken && this.authorizedUserId !== undefined;
+  },
+  get feishuEnabled(): boolean {
+    return !!this.feishuAppId && !!this.feishuAppSecret && !!this.feishuAuthorizedOpenId;
   },
   get selfEditEnabled(): boolean {
     return process.env.MAX_SELF_EDIT === "1";

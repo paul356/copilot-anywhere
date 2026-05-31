@@ -2,7 +2,6 @@ import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { randomBytes } from "crypto";
-import { sendToOrchestrator, getAgentInfo, cancelCurrentMessage, getLastRouteResult } from "../copilot/orchestrator.js";
 import { sendPhoto } from "../telegram/bot.js";
 import { config, persistModel } from "../config.js";
 import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
@@ -11,6 +10,17 @@ import { readPage, ensureWikiStructure } from "../wiki/fs.js";
 import { listSkills, removeSkill } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { API_TOKEN_PATH, ensureMaxHome } from "../paths.js";
+
+import { MessageHandler } from "../message-handler.js";
+import { route } from "../command-router.js";
+
+// Set by daemon.ts at startup
+let _messageHandler: MessageHandler | undefined;
+type CancelFn = (channelId: string) => void;
+let _cancelChannel: CancelFn | undefined;
+
+export function setMessageHandler(mh: MessageHandler): void { _messageHandler = mh; }
+export function setCancelChannel(fn: CancelFn): void { _cancelChannel = fn; }
 
 // Ensure token file exists (generate on first run)
 let apiToken: string | null = null;
@@ -47,25 +57,20 @@ let connectionCounter = 0;
 
 // Health check — intentionally unauthenticated, returns no sensitive data
 app.get("/status", (_req: Request, res: Response) => {
-  const workers = getAgentInfo();
   res.json({
     status: "ok",
-    workers: workers.map((w) => ({
-      slug: w.slug,
-      taskId: w.taskId,
-      description: w.description,
-    })),
+    workers: [], // pass-through mode — no agent workers
   });
 });
 
-// List agents
+// List agents (pass-through mode — no agents, always empty)
 app.get("/agents", (_req: Request, res: Response) => {
-  res.json(getAgentInfo());
+  res.json([]);
 });
 
 // Keep /sessions as an alias for backwards compat
 app.get("/sessions", (_req: Request, res: Response) => {
-  res.json(getAgentInfo());
+  res.json([]);
 });
 
 // SSE stream for real-time responses
@@ -92,7 +97,7 @@ app.get("/stream", (req: Request, res: Response) => {
   });
 });
 
-// Send a message to the orchestrator
+// Send a message to Copilot (same pass-through flow as Feishu)
 app.post("/message", (req: Request, res: Response) => {
   const { prompt, connectionId } = req.body as { prompt?: string; connectionId?: string };
 
@@ -106,45 +111,45 @@ app.post("/message", (req: Request, res: Response) => {
     return;
   }
 
-  sendToOrchestrator(
-    prompt,
-    { type: "tui", connectionId },
-    (text: string, done: boolean) => {
-      const sseRes = sseClients.get(connectionId);
-      if (sseRes) {
-        const event: Record<string, unknown> = {
-          type: done ? "message" : "delta",
-          content: text,
-        };
-        if (done) {
-          const routeResult = getLastRouteResult();
-          if (routeResult) {
-            event.route = {
-              model: routeResult.model,
-              routerMode: routeResult.routerMode,
-              tier: routeResult.tier,
-              ...(routeResult.overrideName ? { overrideName: routeResult.overrideName } : {}),
-            };
-          }
-        }
-        sseRes.write(`data: ${JSON.stringify(event)}\n\n`);
-      }
+  if (!_messageHandler) {
+    res.status(503).json({ error: "Message handler not ready yet" });
+    return;
+  }
+
+  const channelKey = `tui:${connectionId}`;
+  const result = route(prompt, { senderId: channelKey, channelKey });
+
+  _messageHandler.handle(result, channelKey, (text: string, done: boolean) => {
+    const sseRes = sseClients.get(connectionId);
+    if (sseRes) {
+      sseRes.write(
+        `data: ${JSON.stringify({ type: done ? "message" : "delta", content: text })}\n\n`
+      );
     }
-  );
+  });
 
   res.json({ status: "queued" });
 });
 
-// Cancel the current in-flight message
-app.post("/cancel", async (_req: Request, res: Response) => {
-  const cancelled = await cancelCurrentMessage();
-  // Notify all SSE clients that the message was cancelled
-  for (const [, sseRes] of sseClients) {
+// Cancel the current in-flight message for a specific TUI connection.
+app.post("/cancel", async (req: Request, res: Response) => {
+  const { connectionId } = req.body as { connectionId?: string };
+
+  if (!connectionId || !sseClients.has(connectionId)) {
+    res.status(400).json({ error: "Missing or invalid 'connectionId'. Connect to /stream first." });
+    return;
+  }
+
+  if (_cancelChannel) {
+    _cancelChannel(`tui:${connectionId}`);
+  }
+  const sseRes = sseClients.get(connectionId);
+  if (sseRes) {
     sseRes.write(
       `data: ${JSON.stringify({ type: "cancelled" })}\n\n`
     );
   }
-  res.json({ status: "ok", cancelled });
+  res.json({ status: "ok", cancelled: true });
 });
 
 // Get or switch model
@@ -196,11 +201,10 @@ app.get("/models", async (_req: Request, res: Response) => {
 // Get auto-routing config
 app.get("/auto", (_req: Request, res: Response) => {
   const routerConfig = getRouterConfig();
-  const lastRoute = getLastRouteResult();
   res.json({
     ...routerConfig,
     currentModel: config.copilotModel,
-    lastRoute: lastRoute || null,
+    lastRoute: null, // pass-through mode — no route metadata
   });
 });
 
@@ -312,4 +316,12 @@ export function broadcastToSSE(text: string): void {
       `data: ${JSON.stringify({ type: "message", content: text })}\n\n`
     );
   }
+}
+
+export function sendToSSEConnection(connectionId: string, text: string): void {
+  const res = sseClients.get(connectionId);
+  if (!res) return;
+  res.write(
+    `data: ${JSON.stringify({ type: "message", content: text })}\n\n`
+  );
 }

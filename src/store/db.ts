@@ -27,6 +27,7 @@ export function getDb(): Database.Database {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slug TEXT UNIQUE NOT NULL,
         name TEXT NOT NULL,
+        copilot_session_id TEXT,
         model TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'idle',
         current_task TEXT,
@@ -34,6 +35,18 @@ export function getDb(): Database.Database {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migration: add copilot_session_id if missing (existing DBs)
+    try {
+      db.exec(`ALTER TABLE agent_sessions ADD COLUMN copilot_session_id TEXT`);
+    } catch {
+      // Column already exists, ignore
+    }
+    // Migration: add config_dir to worker_sessions (existing DBs)
+    try {
+      db.exec(`ALTER TABLE worker_sessions ADD COLUMN config_dir TEXT`);
+    } catch {
+      // Column already exists, ignore
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_tasks (
         task_id TEXT PRIMARY KEY,
@@ -188,6 +201,70 @@ export function getRecentConversation(limit = 20): string {
 // The memories table and FTS5 index are preserved in the schema for safety
 // (existing data is not deleted), but no code reads or writes to them.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Workspace management (using worker_sessions + max_state)
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceRow {
+  name: string;
+  working_dir: string;
+  copilot_session_id: string | null;
+  config_dir: string | null;
+}
+
+export function listWorkspaces(): WorkspaceRow[] {
+  const db = getDb();
+  return db.prepare(`SELECT name, working_dir, copilot_session_id, config_dir FROM worker_sessions ORDER BY name`).all() as WorkspaceRow[];
+}
+
+export function getWorkspace(name: string): WorkspaceRow | undefined {
+  const db = getDb();
+  return db.prepare(`SELECT name, working_dir, copilot_session_id, config_dir FROM worker_sessions WHERE name = ?`).get(name) as WorkspaceRow | undefined;
+}
+
+export function createWorkspace(name: string, workingDir: string): void {
+  const db = getDb();
+  db.prepare(`INSERT INTO worker_sessions (name, working_dir, status) VALUES (?, ?, 'idle')`).run(name, workingDir);
+}
+
+export function deleteWorkspace(name: string): void {
+  const db = getDb();
+  db.prepare(`DELETE FROM worker_sessions WHERE name = ?`).run(name);
+}
+
+export function saveWorkspaceSessionId(name: string, sessionId: string): void {
+  const db = getDb();
+  db.prepare(`UPDATE worker_sessions SET copilot_session_id = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`).run(sessionId, name);
+}
+
+export function saveWorkspaceConfigDir(name: string, configDir: string): void {
+  const db = getDb();
+  db.prepare(`UPDATE worker_sessions SET config_dir = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`).run(configDir, name);
+}
+
+export function clearWorkspaceSessionId(name: string): void {
+  const db = getDb();
+  db.prepare(`UPDATE worker_sessions SET copilot_session_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE name = ?`).run(name);
+}
+
+/** Map per-connection TUI keys (tui:tui-1, tui:tui-2) to a single stable key
+ *  so workspace preferences survive SSE reconnects.
+ *  Feishu and other channels pass through unchanged so each user is isolated. */
+function normalizeChannelKey(channelKey: string): string {
+  if (channelKey.startsWith("tui:")) return "tui:main";
+  return channelKey;
+}
+
+/** Get the active workspace name for a channel key (e.g. "telegram:123"). Returns "default" if not set. */
+export function getActiveWorkspace(channelKey: string): string {
+  return getState(`active_ws:${normalizeChannelKey(channelKey)}`) ?? "default";
+}
+
+/** Set the active workspace for a channel key. */
+export function setActiveWorkspace(channelKey: string, name: string): void {
+  setState(`active_ws:${normalizeChannelKey(channelKey)}`, name);
+}
 
 export function closeDb(): void {
   if (db) {

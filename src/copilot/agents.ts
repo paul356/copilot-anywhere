@@ -358,7 +358,8 @@ export async function createEphemeralAgentSession(
   slug: string,
   client: CopilotClient,
   allTools: Tool<any>[],
-  modelOverride?: string
+  modelOverride?: string,
+  workingDirectory?: string
 ): Promise<CopilotSession> {
   const agent = getAgent(slug);
   if (!agent) throw new Error(`Agent '${slug}' not found in registry.`);
@@ -375,7 +376,7 @@ export async function createEphemeralAgentSession(
   const session = await client.createSession({
     model,
     configDir: SESSIONS_DIR,
-    workingDirectory: process.cwd(),
+    workingDirectory: workingDirectory ?? process.cwd(),
     streaming: true,
     systemMessage: { content: composeAgentSystemMessage(agent) },
     tools,
