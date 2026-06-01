@@ -114,13 +114,14 @@ export class CLIProcess extends EventEmitter {
         reject(new Error(`Timed out waiting for CLI output (${timeoutMs}ms)`));
       }, timeoutMs);
 
-      this.on("pty-output", onData);
-      // Copilot CLI's TUI reads PTY input in chunks: if cmd+"\r" arrive in one
-      // chunk, the "\r" is appended to the input buffer before Enter is detected,
-      // so the argument includes the trailing "\r". Sending them as two separate
-      // writes ensures the buffer only contains the clean command when "\r" arrives.
       this.proc!.write(cmd);
-      setTimeout(() => { this.proc?.write("\r"); }, 50);
+      // Start collecting output only after \r is sent, so the command echo
+      // (which arrives in the 50ms window) is excluded from the captured output.
+      // This prevents renderTerminal from seeing two overlapping screen renders.
+      setTimeout(() => {
+        this.on("pty-output", onData);
+        this.proc?.write("\r");
+      }, 50);
     });
   }
 

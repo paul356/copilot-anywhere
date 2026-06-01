@@ -77,15 +77,55 @@ const PTY_ROWS = 40;
  * Returns the final screen contents as plain text with trailing whitespace
  * stripped from each line and empty trailing lines removed.
  */
-function renderTerminal(raw: string): string {
-  const screen: string[][] = Array.from({ length: PTY_ROWS }, () => Array(PTY_COLS).fill(" "));
-  let row = 0, col = 0;
-  let i = 0;
+/** Persistent terminal screen state, shared across pager-page renders. */
+interface TerminalState {
+  screen: string[][];
+  row: number;
+  col: number;
+  scrollTop: number;
+  scrollBottom: number;
+  /** VT100 auto-wrap pending: set when a char is written to the last column.
+   *  The actual wrap is deferred until the next printable char is written. */
+  pendingWrap: boolean;
+}
 
+function createTerminalState(): TerminalState {
+  return {
+    screen: Array.from({ length: PTY_ROWS }, () => Array(PTY_COLS).fill(" ")),
+    row: 0,
+    col: 0,
+    scrollTop: 0,
+    scrollBottom: PTY_ROWS - 1,
+    pendingWrap: false,
+  };
+}
+
+/**
+ * Process raw PTY bytes into an existing TerminalState (mutates in place).
+ * Calling this multiple times on the same state correctly handles pagers that
+ * use differential rendering (only redrawing changed cells across pages).
+ */
+function renderInto(raw: string, st: TerminalState): void {
   const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
   const parseNum = (s: string, def: number) => { const n = parseInt(s); return isNaN(n) ? def : n; };
+  // Clear pendingWrap whenever cursor is explicitly repositioned.
+  const clearWrap = () => { st.pendingWrap = false; };
+
+  const scrollUp = (n: number) => {
+    for (let k = 0; k < n; k++) {
+      st.screen.splice(st.scrollTop, 1);
+      st.screen.splice(st.scrollBottom, 0, Array(PTY_COLS).fill(" "));
+    }
+  };
+  const scrollDown = (n: number) => {
+    for (let k = 0; k < n; k++) {
+      st.screen.splice(st.scrollBottom, 1);
+      st.screen.splice(st.scrollTop, 0, Array(PTY_COLS).fill(" "));
+    }
+  };
 
   const chars = Array.from(raw); // iterate Unicode code points (handles emoji etc.)
+  let i = 0;
 
   while (i < chars.length) {
     const ch = chars[i];
@@ -101,49 +141,50 @@ function renderTerminal(raw: string): string {
         switch (cmd) {
           case "H": case "f": { // cursor position [row;col]
             const parts = params.split(";");
-            row = clamp(parseNum(parts[0], 1) - 1, 0, PTY_ROWS - 1);
-            col = clamp(parseNum(parts[1], 1) - 1, 0, PTY_COLS - 1);
+            st.row = clamp(parseNum(parts[0], 1) - 1, 0, PTY_ROWS - 1);
+            st.col = clamp(parseNum(parts[1], 1) - 1, 0, PTY_COLS - 1);
+            clearWrap();
             break;
           }
           case "G": // cursor absolute column
-            col = clamp(parseNum(params, 1) - 1, 0, PTY_COLS - 1);
+            st.col = clamp(parseNum(params, 1) - 1, 0, PTY_COLS - 1);
+            clearWrap();
             break;
           case "d": // cursor absolute row
-            row = clamp(parseNum(params, 1) - 1, 0, PTY_ROWS - 1);
+            st.row = clamp(parseNum(params, 1) - 1, 0, PTY_ROWS - 1);
+            clearWrap();
             break;
-          case "A": row = clamp(row - parseNum(params, 1), 0, PTY_ROWS - 1); break;
-          case "B": row = clamp(row + parseNum(params, 1), 0, PTY_ROWS - 1); break;
-          case "C": col = clamp(col + parseNum(params, 1), 0, PTY_COLS - 1); break;
-          case "D": col = clamp(col - parseNum(params, 1), 0, PTY_COLS - 1); break;
+          case "A": st.row = clamp(st.row - parseNum(params, 1), 0, PTY_ROWS - 1); clearWrap(); break;
+          case "B": st.row = clamp(st.row + parseNum(params, 1), 0, PTY_ROWS - 1); clearWrap(); break;
+          case "C": st.col = clamp(st.col + parseNum(params, 1), 0, PTY_COLS - 1); clearWrap(); break;
+          case "D": st.col = clamp(st.col - parseNum(params, 1), 0, PTY_COLS - 1); clearWrap(); break;
+          case "r": { // DECSTBM — set scrolling region (cursor position unchanged)
+            const parts = params.split(";");
+            st.scrollTop = clamp(parseNum(parts[0], 1) - 1, 0, PTY_ROWS - 1);
+            st.scrollBottom = clamp(parseNum(parts[1], PTY_ROWS) - 1, 0, PTY_ROWS - 1);
+            break;
+          }
           case "J": // erase in display
             if (params === "2" || params === "3") {
-              for (const r of screen) r.fill(" ");
-              row = 0; col = 0;
+              for (const r of st.screen) r.fill(" ");
+              st.row = 0; st.col = 0;
             } else if (params === "1") {
-              for (let r = 0; r < row; r++) screen[r].fill(" ");
-              for (let c = 0; c <= col; c++) screen[row][c] = " ";
+              for (let r = 0; r < st.row; r++) st.screen[r].fill(" ");
+              for (let c = 0; c <= st.col; c++) st.screen[st.row][c] = " ";
             } else { // 0 or empty: from cursor to end
-              for (let c = col; c < PTY_COLS; c++) screen[row][c] = " ";
-              for (let r = row + 1; r < PTY_ROWS; r++) screen[r].fill(" ");
+              for (let c = st.col; c < PTY_COLS; c++) st.screen[st.row][c] = " ";
+              for (let r = st.row + 1; r < PTY_ROWS; r++) st.screen[r].fill(" ");
             }
+            clearWrap();
             break;
           case "K": // erase in line
-            if (params === "1") { for (let c = 0; c <= col; c++) screen[row][c] = " "; }
-            else if (params === "2") { screen[row].fill(" "); }
-            else { for (let c = col; c < PTY_COLS; c++) screen[row][c] = " "; }
+            if (params === "1") { for (let c = 0; c <= st.col; c++) st.screen[st.row][c] = " "; }
+            else if (params === "2") { st.screen[st.row].fill(" "); }
+            else { for (let c = st.col; c < PTY_COLS; c++) st.screen[st.row][c] = " "; }
+            clearWrap();
             break;
-          case "S": // scroll up
-            for (let n = 0; n < parseNum(params, 1); n++) {
-              screen.shift();
-              screen.push(Array(PTY_COLS).fill(" "));
-            }
-            break;
-          case "T": // scroll down
-            for (let n = 0; n < parseNum(params, 1); n++) {
-              screen.pop();
-              screen.unshift(Array(PTY_COLS).fill(" "));
-            }
-            break;
+          case "S": scrollUp(parseNum(params, 1)); clearWrap(); break;
+          case "T": scrollDown(parseNum(params, 1)); clearWrap(); break;
           // All other CSI sequences (SGR colors, mode changes, etc.) are ignored
         }
       } else if (next === "]") {
@@ -155,30 +196,49 @@ function renderTerminal(raw: string): string {
         i += 2; // other 2-char escape — skip
       }
     } else if (ch === "\r") {
-      col = 0; i++;
+      st.col = 0; st.pendingWrap = false; i++;
     } else if (ch === "\n") {
-      row = clamp(row + 1, 0, PTY_ROWS - 1); i++;
+      st.row = clamp(st.row + 1, 0, PTY_ROWS - 1);
+      i++;
     } else if (ch === "\b") {
-      col = Math.max(0, col - 1); i++;
+      st.col = Math.max(0, st.col - 1); st.pendingWrap = false; i++;
     } else if (ch === "\t") {
-      col = clamp((col + 8) & ~7, 0, PTY_COLS - 1); i++;
+      st.col = clamp((st.col + 8) & ~7, 0, PTY_COLS - 1); st.pendingWrap = false; i++;
     } else if (ch >= " ") {
-      // Printable character (ASCII or Unicode)
-      if (row < PTY_ROWS && col < PTY_COLS) {
-        screen[row][col] = ch;
-        col++;
-        if (col >= PTY_COLS) { col = 0; row = clamp(row + 1, 0, PTY_ROWS - 1); }
+      // Printable character — apply any pending wrap first (VT100 auto-wrap behaviour).
+      if (st.pendingWrap) {
+        st.col = 0;
+        st.row = clamp(st.row + 1, 0, PTY_ROWS - 1);
+        st.pendingWrap = false;
+      }
+      if (st.row < PTY_ROWS && st.col < PTY_COLS) {
+        st.screen[st.row][st.col] = ch;
+        st.col++;
+        if (st.col >= PTY_COLS) {
+          // Don't wrap yet; set flag so the wrap fires on the next printable char.
+          st.col = PTY_COLS - 1;
+          st.pendingWrap = true;
+        }
       }
       i++;
     } else {
       i++; // skip other control characters
     }
   }
+}
 
-  // Read screen buffer: trim trailing whitespace per line, drop trailing blank lines
-  const lines = screen.map(line => line.join("").trimEnd());
+/** Extract the current screen buffer as plain text. */
+function extractScreen(st: TerminalState): string {
+  const lines = st.screen.map(line => line.join("").trimEnd());
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** Render a standalone PTY chunk into a fresh terminal and return the text. */
+function renderTerminal(raw: string): string {
+  const st = createTerminalState();
+  renderInto(raw, st);
+  return extractScreen(st);
 }
 
 /**
@@ -219,10 +279,13 @@ function findOverlapLen(prevLines: string[], newLines: string[]): number {
 /**
  * Scroll through a pager that is currently open in the PTY, collecting all
  * pages of content and merging them into a single string.
+ * Uses a persistent TerminalState so differential pager renders (which skip
+ * characters already on screen) are handled correctly across pages.
  * Sends Escape when done to dismiss the pager.
  */
 async function collectPagerContent(
   cliProcess: CLIProcess,
+  st: TerminalState,
   firstPageContent: string,
   maxPages = 30,
 ): Promise<string> {
@@ -237,7 +300,11 @@ async function collectPagerContent(
   for (let page = 0; page < maxPages; page++) {
     cliProcess.sendRaw(DOWN_ARROW.repeat(SCROLL_LINES));
     const rawPage = await cliProcess.captureOutput(400, 4_000);
-    const { content: pageContent, hasPager: stillOpen } = stripPager(renderTerminal(rawPage));
+    // Feed raw bytes into the SAME persistent state so differential rendering
+    // (pager skipping unchanged cells) is handled correctly.
+    renderInto(rawPage, st);
+    const screenAfter = extractScreen(st);
+    const { content: pageContent, hasPager: stillOpen } = stripPager(screenAfter);
 
     if (!stillOpen || pageContent === prevContent) {
       break;
@@ -503,9 +570,11 @@ export class MessageHandler {
             CLI_COMMAND_TIMEOUT_MS,
             CLI_COMMAND_SETTLE_MS,
           );
-          const { content: firstPage, hasPager } = stripPager(renderTerminal(rawOutput));
+          const st = createTerminalState();
+          renderInto(rawOutput, st);
+          const { content: firstPage, hasPager } = stripPager(extractScreen(st));
           const result = hasPager
-            ? await collectPagerContent(this.options.cliProcess, firstPage)
+            ? await collectPagerContent(this.options.cliProcess, st, firstPage)
             : firstPage;
           console.log(`[message-handler] cli-command response (${Date.now() - t0}ms, ${result.length} chars): ${result.slice(0, 120)}`);
           callback(result || `(command sent: ${routed.command})`, true);
