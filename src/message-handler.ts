@@ -64,6 +64,24 @@ function stripAnsi(text: string): string {
     .trim();
 }
 
+/**
+ * Detect whether the PTY output contains an interactive pager (e.g. copilot's
+ * /help or /skills overlay) and strip the pager chrome (borders, scroll hint).
+ * Returns the cleaned content and whether a pager was detected.
+ */
+function stripPager(text: string): { content: string; hasPager: boolean } {
+  const hasPager = text.includes("esc close") || /┃\s*$/.test(text);
+  if (!hasPager) return { content: text, hasPager: false };
+
+  // Remove the scroll hint line and all box border characters
+  const cleaned = text
+    .replace(/[↑↓]\/[↑↓] scroll[^\n]*/g, "")  // scroll hint
+    .replace(/┃/g, "")                          // right-side box border
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { content: cleaned, hasPager: true };
+}
+
 // ── Message Handler ────────────────────────────────────────────────
 
 export class MessageHandler {
@@ -308,9 +326,13 @@ export class MessageHandler {
             CLI_COMMAND_TIMEOUT_MS,
             CLI_COMMAND_SETTLE_MS,
           );
-          const clean = stripAnsi(rawOutput);
-          console.log(`[message-handler] cli-command response (${Date.now() - t0}ms, ${clean.length} chars): ${clean.slice(0, 120)}`);
-          callback(clean || `(command sent: ${routed.command})`, true);
+          const { content: stripped, hasPager } = stripPager(stripAnsi(rawOutput));
+          if (hasPager) {
+            // Dismiss the interactive pager so PTY stays in a clean state
+            this.options.cliProcess.sendRaw("\x1b");
+          }
+          console.log(`[message-handler] cli-command response (${Date.now() - t0}ms, ${stripped.length} chars): ${stripped.slice(0, 120)}`);
+          callback(stripped || `(command sent: ${routed.command})`, true);
         } catch (err) {
           console.error(`[message-handler] cli-command failed: ${routed.command.slice(0, 80)} — ${err instanceof Error ? err.message : String(err)}`);
           // Timeout or PTY error — still confirm the command was sent

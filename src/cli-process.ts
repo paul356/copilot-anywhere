@@ -122,6 +122,11 @@ export class CLIProcess extends EventEmitter {
     return this.proc !== undefined && this.exitCode === null;
   }
 
+  /** Send raw bytes to the PTY (e.g. Escape key to dismiss a pager). */
+  sendRaw(data: string): void {
+    this.proc?.write(data);
+  }
+
   /** Graceful stop — send SIGTERM, force kill after timeout */
   async stop(): Promise<void> {
     if (!this.proc) return;
