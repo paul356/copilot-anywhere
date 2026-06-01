@@ -64,6 +64,123 @@ function stripAnsi(text: string): string {
     .trim();
 }
 
+// PTY dimensions — must match the values in cli-process.ts
+const PTY_COLS = 120;
+const PTY_ROWS = 40;
+
+/**
+ * Render raw PTY output through a lightweight terminal screen emulator.
+ * Correctly handles cursor absolute column positioning (\x1b[NG) so that
+ * command names and descriptions that are positioned via cursor movement
+ * are rendered with proper spacing rather than concatenated together.
+ *
+ * Returns the final screen contents as plain text with trailing whitespace
+ * stripped from each line and empty trailing lines removed.
+ */
+function renderTerminal(raw: string): string {
+  const screen: string[][] = Array.from({ length: PTY_ROWS }, () => Array(PTY_COLS).fill(" "));
+  let row = 0, col = 0;
+  let i = 0;
+
+  const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+  const parseNum = (s: string, def: number) => { const n = parseInt(s); return isNaN(n) ? def : n; };
+
+  const chars = Array.from(raw); // iterate Unicode code points (handles emoji etc.)
+
+  while (i < chars.length) {
+    const ch = chars[i];
+    if (ch === "\x1b") {
+      const next = chars[i + 1];
+      if (next === "[") {
+        // CSI sequence: ESC [ <params...> <final>
+        let j = i + 2;
+        while (j < chars.length && (chars[j].charCodeAt(0) < 0x40 || chars[j].charCodeAt(0) > 0x7e)) j++;
+        const params = chars.slice(i + 2, j).join("");
+        const cmd = chars[j] ?? "";
+        i = j + 1;
+        switch (cmd) {
+          case "H": case "f": { // cursor position [row;col]
+            const parts = params.split(";");
+            row = clamp(parseNum(parts[0], 1) - 1, 0, PTY_ROWS - 1);
+            col = clamp(parseNum(parts[1], 1) - 1, 0, PTY_COLS - 1);
+            break;
+          }
+          case "G": // cursor absolute column
+            col = clamp(parseNum(params, 1) - 1, 0, PTY_COLS - 1);
+            break;
+          case "d": // cursor absolute row
+            row = clamp(parseNum(params, 1) - 1, 0, PTY_ROWS - 1);
+            break;
+          case "A": row = clamp(row - parseNum(params, 1), 0, PTY_ROWS - 1); break;
+          case "B": row = clamp(row + parseNum(params, 1), 0, PTY_ROWS - 1); break;
+          case "C": col = clamp(col + parseNum(params, 1), 0, PTY_COLS - 1); break;
+          case "D": col = clamp(col - parseNum(params, 1), 0, PTY_COLS - 1); break;
+          case "J": // erase in display
+            if (params === "2" || params === "3") {
+              for (const r of screen) r.fill(" ");
+              row = 0; col = 0;
+            } else if (params === "1") {
+              for (let r = 0; r < row; r++) screen[r].fill(" ");
+              for (let c = 0; c <= col; c++) screen[row][c] = " ";
+            } else { // 0 or empty: from cursor to end
+              for (let c = col; c < PTY_COLS; c++) screen[row][c] = " ";
+              for (let r = row + 1; r < PTY_ROWS; r++) screen[r].fill(" ");
+            }
+            break;
+          case "K": // erase in line
+            if (params === "1") { for (let c = 0; c <= col; c++) screen[row][c] = " "; }
+            else if (params === "2") { screen[row].fill(" "); }
+            else { for (let c = col; c < PTY_COLS; c++) screen[row][c] = " "; }
+            break;
+          case "S": // scroll up
+            for (let n = 0; n < parseNum(params, 1); n++) {
+              screen.shift();
+              screen.push(Array(PTY_COLS).fill(" "));
+            }
+            break;
+          case "T": // scroll down
+            for (let n = 0; n < parseNum(params, 1); n++) {
+              screen.pop();
+              screen.unshift(Array(PTY_COLS).fill(" "));
+            }
+            break;
+          // All other CSI sequences (SGR colors, mode changes, etc.) are ignored
+        }
+      } else if (next === "]") {
+        // OSC: skip to BEL or ST
+        let j = i + 2;
+        while (j < chars.length && chars[j] !== "\x07" && !(chars[j] === "\x1b" && chars[j + 1] === "\\")) j++;
+        i = j + (chars[j] === "\x07" ? 1 : chars[j] === "\x1b" ? 2 : 1);
+      } else {
+        i += 2; // other 2-char escape — skip
+      }
+    } else if (ch === "\r") {
+      col = 0; i++;
+    } else if (ch === "\n") {
+      row = clamp(row + 1, 0, PTY_ROWS - 1); i++;
+    } else if (ch === "\b") {
+      col = Math.max(0, col - 1); i++;
+    } else if (ch === "\t") {
+      col = clamp((col + 8) & ~7, 0, PTY_COLS - 1); i++;
+    } else if (ch >= " ") {
+      // Printable character (ASCII or Unicode)
+      if (row < PTY_ROWS && col < PTY_COLS) {
+        screen[row][col] = ch;
+        col++;
+        if (col >= PTY_COLS) { col = 0; row = clamp(row + 1, 0, PTY_ROWS - 1); }
+      }
+      i++;
+    } else {
+      i++; // skip other control characters
+    }
+  }
+
+  // Read screen buffer: trim trailing whitespace per line, drop trailing blank lines
+  const lines = screen.map(line => line.join("").trimEnd());
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 /**
  * Detect whether the PTY output contains an interactive pager (e.g. copilot's
  * /help or /skills overlay) and strip the pager chrome (borders, scroll hint).
@@ -123,7 +240,7 @@ async function collectPagerContent(
     cliProcess.sendRaw(DOWN_ARROW.repeat(SCROLL_LINES));
     const rawPage = await cliProcess.captureOutput(400, 4_000);
     console.log(`[pager] Page ${page + 1}: captureOutput=${rawPage.length} raw chars`);
-    const { content: pageContent, hasPager: stillOpen } = stripPager(stripAnsi(rawPage));
+    const { content: pageContent, hasPager: stillOpen } = stripPager(renderTerminal(rawPage));
     console.log(`[pager] Page ${page + 1}: hasPager=${stillOpen}, content=${pageContent.length} chars, preview="${pageContent.slice(0, 80).replace(/\n/g, "↵")}"`);
 
     if (!stillOpen || pageContent === prevContent) {
@@ -393,7 +510,7 @@ export class MessageHandler {
             CLI_COMMAND_TIMEOUT_MS,
             CLI_COMMAND_SETTLE_MS,
           );
-          const { content: firstPage, hasPager } = stripPager(stripAnsi(rawOutput));
+          const { content: firstPage, hasPager } = stripPager(renderTerminal(rawOutput));
           const result = hasPager
             ? await collectPagerContent(this.options.cliProcess, firstPage)
             : firstPage;
