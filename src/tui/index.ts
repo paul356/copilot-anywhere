@@ -437,7 +437,7 @@ function showStatus(model?: string, skillCount?: number, routerInfo?: { enabled:
   if (skillCount !== undefined) parts.push(`${C.dim("skills:")} ${C.cyan(String(skillCount))}`);
   if (parts.length) console.log(`    ${parts.join("    ")}`);
   console.log();
-  console.log(C.dim("    /help for commands · esc to cancel"));
+  console.log(C.dim("    /max:help for max commands · /help for copilot commands · esc to cancel"));
   console.log();
 }
 
@@ -965,8 +965,9 @@ function cmdAuto(): void {
 
 function cmdHelp(): void {
   console.log();
-  console.log(C.boldWhite("    COMMANDS"));
+  console.log(C.boldWhite("    MAX COMMANDS"));
   console.log();
+  console.log(`    ${C.coral("/max:help")}              show this help`);
   console.log(`    ${C.coral("/model")} ${C.dim("[name]")}        show or switch model`);
   console.log(`    ${C.coral("/models")}               list all available models`);
   console.log(`    ${C.coral("/auto")}                 toggle auto model routing`);
@@ -979,6 +980,7 @@ function cmdHelp(): void {
   console.log(`    ${C.coral("/clear")}                clear screen`);
   console.log(`    ${C.coral("/quit")}                 exit`);
   console.log();
+  console.log(C.dim("    /help is forwarded to the Copilot agent for its built-in commands"));
   console.log(C.dim("    press escape to cancel a running response"));
   console.log(C.dim("    set MAX_TUI_DEBUG=1 to write lifecycle logs to ~/.max/tui-debug.log"));
   console.log();
@@ -1065,7 +1067,7 @@ setTimeout(() => {
     if (trimmed === "/auto") { cmdAuto(); return; }
     if (trimmed === "/memory") { cmdMemory(); return; }
     if (trimmed === "/skills") { cmdSkills(); return; }
-    if (trimmed === "/help") { cmdHelp(); return; }
+    if (trimmed === "/max:help") { cmdHelp(); return; }
 
     if (trimmed === "/status") {
       apiGet("/status", (data: any) => {
