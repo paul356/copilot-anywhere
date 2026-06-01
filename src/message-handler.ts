@@ -234,24 +234,18 @@ async function collectPagerContent(
   let prevContent = firstPageContent;
   let prevLines = allLines;
 
-  console.log(`[pager] Starting scroll, firstPage=${firstPageContent.length} chars, ${allLines.length} lines`);
-
   for (let page = 0; page < maxPages; page++) {
     cliProcess.sendRaw(DOWN_ARROW.repeat(SCROLL_LINES));
     const rawPage = await cliProcess.captureOutput(400, 4_000);
-    console.log(`[pager] Page ${page + 1}: captureOutput=${rawPage.length} raw chars`);
     const { content: pageContent, hasPager: stillOpen } = stripPager(renderTerminal(rawPage));
-    console.log(`[pager] Page ${page + 1}: hasPager=${stillOpen}, content=${pageContent.length} chars, preview="${pageContent.slice(0, 80).replace(/\n/g, "↵")}"`);
 
     if (!stillOpen || pageContent === prevContent) {
-      console.log(`[pager] Stopping: stillOpen=${stillOpen}, sameContent=${pageContent === prevContent}`);
       break;
     }
 
     const newLines = pageContent.split("\n").filter(l => l.trim());
     const skipLen = findOverlapLen(prevLines, newLines);
     const added = newLines.slice(skipLen);
-    console.log(`[pager] ${newLines.length} lines, overlap=${skipLen}, new=${added.length}`);
     if (added.length === 0) break;
 
     allLines.push(...added);
@@ -259,7 +253,6 @@ async function collectPagerContent(
     prevContent = pageContent;
   }
 
-  console.log(`[pager] Done: ${allLines.length} total lines`);
   // Dismiss the pager
   cliProcess.sendRaw("\x1b");
 
