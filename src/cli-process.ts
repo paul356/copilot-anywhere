@@ -79,7 +79,9 @@ export class CLIProcess extends EventEmitter {
   ): Promise<string> {
     if (!this.proc) throw new Error("CLI process not running");
 
+    const cmdHex = Buffer.from(cmd).toString("hex").match(/../g)!.join(" ");
     console.log(`[cli-process] sendCommandAndWait: ${cmd.slice(0, 80)} (timeout=${timeoutMs}ms, settle=${settleMs}ms)`);
+    console.log(`[cli-process] command bytes (${cmd.length} chars): ${cmdHex.slice(0, 120)}`);
 
     return new Promise((resolve, reject) => {
       const chunks: string[] = [];
@@ -113,7 +115,12 @@ export class CLIProcess extends EventEmitter {
       }, timeoutMs);
 
       this.on("pty-output", onData);
-      this.proc!.write(cmd + "\r");
+      // Copilot CLI's TUI reads PTY input in chunks: if cmd+"\r" arrive in one
+      // chunk, the "\r" is appended to the input buffer before Enter is detected,
+      // so the argument includes the trailing "\r". Sending them as two separate
+      // writes ensures the buffer only contains the clean command when "\r" arrives.
+      this.proc!.write(cmd);
+      setTimeout(() => { this.proc?.write("\r"); }, 50);
     });
   }
 
