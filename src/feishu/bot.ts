@@ -2,11 +2,58 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { config } from "../config.js";
 import { route, RoutedMessage, executeMaxCommand, CommandResult } from "../command-router.js";
 import { MessageHandler } from "../message-handler.js";
-import { buildCardContent, buildTextContent, chunkMessage } from "./formatter.js";
+import { buildCardContent, buildTextContent, buildQuestionCard, chunkMessage } from "./formatter.js";
 
 let client: Lark.Client | undefined;
 let wsClient: Lark.WSClient | undefined;
 let eventDispatcher: Lark.EventDispatcher | undefined;
+
+interface PendingQuestion {
+  messageId: string;
+  chatId: string;
+  choices: string[];
+  allowFreeform: boolean;
+  cleanupTimer: ReturnType<typeof setTimeout>;
+}
+
+/** openId → pending question waiting for user input */
+const pendingQuestions = new Map<string, PendingQuestion>();
+
+function clearPending(openId: string): PendingQuestion | undefined {
+  const pending = pendingQuestions.get(openId);
+  if (pending) {
+    clearTimeout(pending.cleanupTimer);
+    pendingQuestions.delete(openId);
+  }
+  return pending;
+}
+
+/** Try to parse a question event JSON emitted by ask_user tool. */
+function tryParseQuestion(text: string): { question: string; choices: string[]; allowFreeform: boolean } | null {
+  if (!text || text[0] !== "{") return null;
+  try {
+    const obj = JSON.parse(text);
+    if (obj?.type === "question" && typeof obj.question === "string") {
+      return {
+        question: obj.question,
+        choices: Array.isArray(obj.choices) ? obj.choices : [],
+        allowFreeform: obj.allow_freeform !== false,
+      };
+    }
+  } catch {
+    // not JSON
+  }
+  return null;
+}
+
+/** Map a user text answer to a choice or free-form answer. */
+function resolveChoiceAnswer(text: string, choices: string[]): string {
+  const n = parseInt(text, 10);
+  if (!isNaN(n) && n >= 1 && n <= choices.length) {
+    return choices[n - 1];
+  }
+  return text;
+}
 
 function resolveDomain(domain: "feishu" | "lark"): Lark.Domain {
   return domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
@@ -45,23 +92,36 @@ type MessageReceiveEvent = {
 };
 
 /** Route and process a message through the unified message handler.
- *  Handles all routed types: max-command, cli-command, prompt. */
+ *  Handles all routed types: max-command, cli-command, prompt.
+ *  When the LLM issues an ask_user question, registers a pending entry and
+ *  sends an interactive question card; returns "" in that case. */
 async function processMessage(
   text: string,
   openId: string,
+  messageId: string,
+  chatId: string,
   messageHandler: MessageHandler,
 ): Promise<string> {
   const channelKey = `feishu:${openId}`;
   const result = route(text, { senderId: openId, channelKey });
 
-  const chunks: string[] = [];
-  await messageHandler.handle(result, channelKey, (responseText: string, done: boolean) => {
-    if (responseText) chunks.push(responseText);
+  let latestContent = "";
+  await messageHandler.handle(result, channelKey, (responseText: string, _done: boolean) => {
+    if (!responseText) return;
+    const question = tryParseQuestion(responseText);
+    if (question) {
+      const cleanupTimer = setTimeout(() => pendingQuestions.delete(openId), 5 * 60 * 1000 + 5000);
+      pendingQuestions.set(openId, { messageId, chatId, ...question, cleanupTimer });
+      sendQuestionCard(messageId, chatId, question.question, question.choices, question.allowFreeform)
+        .catch(err => console.error("[feishu] Failed to send question card:", err));
+    } else {
+      // Overwrite each time: streaming sends cumulative text; commands send once with done=true.
+      latestContent = responseText;
+    }
   });
 
-  const fullText = chunks.join("");
-  console.log(`[feishu] processMessage → ${fullText.length} chars (type=${result.type}, sender=${openId})`);
-  return fullText;
+  console.log(`[feishu] processMessage → ${latestContent.length} chars (type=${result.type}, sender=${openId})`);
+  return latestContent;
 }
 
 // ── Deduplication ─────────────────────────────────────────────────
@@ -144,6 +204,33 @@ function isWithdrawnReplyError(err: unknown): boolean {
   return response?.data?.code === 230011 || response?.data?.code === 231003;
 }
 
+/** Send an interactive question card to the user. */
+async function sendQuestionCard(
+  messageId: string,
+  chatId: string,
+  question: string,
+  choices: string[],
+  allowFreeform: boolean,
+): Promise<void> {
+  if (!client) return;
+  const card = buildQuestionCard(question, choices, allowFreeform);
+  try {
+    await client.im.message.reply({
+      path: { message_id: messageId },
+      data: { content: card, msg_type: "interactive" },
+    });
+    return;
+  } catch (err) {
+    if (!isWithdrawnReplyError(err)) {
+      console.error("[feishu] Question card reply failed, falling back:", err);
+    }
+  }
+  await client.im.message.create({
+    params: { receive_id_type: "chat_id" },
+    data: { receive_id: chatId, content: card, msg_type: "interactive" },
+  });
+}
+
 export function createBot(messageHandler: MessageHandler): { client: Lark.Client; wsClient: Lark.WSClient } {
   if (!config.feishuAppId || !config.feishuAppSecret) {
     throw new Error(
@@ -204,11 +291,52 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       // Skip duplicate messages (Feishu retries events if handler takes >3s)
       if (isDuplicate(event.message.message_id)) return;
 
+      // ── Pending question: route text as an answer ──────────────
+      const pending = pendingQuestions.get(senderOpenId);
+      if (pending) {
+        if (text === "/max:skip") {
+          clearPending(senderOpenId);
+          messageHandler.answerUserInput(`feishu:${senderOpenId}`, "(User skipped the question.)");
+          return;
+        }
+        if (text.startsWith("/max:")) {
+          // Cancel the question, answer with placeholder, then fall through to process the command.
+          clearPending(senderOpenId);
+          messageHandler.answerUserInput(`feishu:${senderOpenId}`, "(User sent a command instead of answering.)");
+          // fall through
+        } else {
+          const answer = resolveChoiceAnswer(text, pending.choices);
+          clearPending(senderOpenId);
+          messageHandler.answerUserInput(`feishu:${senderOpenId}`, answer);
+          return;
+        }
+      }
+
       // Route and process through unified message handler
-      const fullText = await processMessage(text, senderOpenId, messageHandler);
+      const fullText = await processMessage(
+        text,
+        senderOpenId,
+        event.message.message_id,
+        event.message.chat_id,
+        messageHandler,
+      );
 
       if (fullText.length > 0) {
         await sendChunkedReply(event.message.message_id, event.message.chat_id, fullText);
+      }
+    },
+
+    "card.action.trigger": async (data: unknown) => {
+      const evt = Lark.normalizeCardAction(data as Lark.RawCardActionEvent);
+      if (!evt) return;
+      const openId = evt.operator.openId;
+      if (openId !== config.feishuAuthorizedOpenId) return;
+      const choice = (evt.action.value as { choice?: string } | undefined)?.choice;
+      if (!choice) return;
+      const pending = pendingQuestions.get(openId);
+      if (pending) {
+        clearPending(openId);
+        messageHandler.answerUserInput(`feishu:${openId}`, choice);
       }
     },
   });

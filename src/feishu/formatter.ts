@@ -54,3 +54,32 @@ export function buildCardContent(markdown: string): string {
 export function buildTextContent(text: string): string {
   return JSON.stringify({ text });
 }
+
+/**
+ * Build an interactive question card for ask_user prompts.
+ * Numbered buttons for each choice; footer explains freeform/skip options.
+ */
+export function buildQuestionCard(question: string, choices: string[], allowFreeform: boolean): string {
+  const elements: object[] = [
+    { tag: "markdown", content: `**💬 ${question}**` },
+  ];
+
+  if (choices.length > 0) {
+    elements.push({
+      tag: "action",
+      actions: choices.map((c, i) => ({
+        tag: "button",
+        text: { tag: "plain_text", content: `${i + 1}. ${c}` },
+        type: "primary",
+        value: { choice: c },
+      })),
+    });
+  }
+
+  const hint = allowFreeform
+    ? "_直接回复文字可输入其他内容，发送 `/max:skip` 跳过_"
+    : "_发送 `/max:skip` 跳过_";
+  elements.push({ tag: "markdown", content: hint });
+
+  return JSON.stringify({ config: { wide_screen_mode: true }, elements });
+}
