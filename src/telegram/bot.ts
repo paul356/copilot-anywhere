@@ -3,7 +3,6 @@ import { config, persistModel } from "../config.js";
 import { chunkMessage, toTelegramMarkdown } from "./formatter.js";
 import { parseIndex } from "../wiki/index-manager.js";
 import { ensureWikiStructure } from "../wiki/fs.js";
-import { listSkills } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
 import { route, executeMaxCommand } from "../command-router.js";
@@ -117,7 +116,6 @@ export function createBot(messageHandler: MessageHandler): Bot {
         "/models — List all available models\n" +
         "/auto — Toggle auto model routing\n" +
         "/memory — Show stored memories\n" +
-        "/skills — List installed skills\n" +
         "/agents — List available agents\n" +
         "/workers — Alias for /agents\n" +
         "/ws — Manage workspaces (directories)\n" +
@@ -187,15 +185,6 @@ export function createBot(messageHandler: MessageHandler): Bot {
         return line;
       });
       await safeReply(ctx, lines.join("\n") + `\n\n${entries.length} wiki pages total`);
-    }
-  });
-  bot.command("skills", async (ctx) => {
-    const skills = listSkills();
-    if (skills.length === 0) {
-      await ctx.reply("No skills installed.");
-    } else {
-      const lines = skills.map((s) => `• ${s.name} (${s.source}) — ${s.description}`);
-      await safeReply(ctx, lines.join("\n"));
     }
   });
   const agentCommandHandler = async (ctx: Context) => {

@@ -105,18 +105,6 @@ ${BOLD}╔═══════════════════════�
   console.log(`  • Manage multiple background tasks simultaneously`);
   console.log(`  • See and attach to any Copilot session on your machine`);
   console.log();
-  console.log(`${CYAN}Skills — teach Max anything:${RESET}`);
-  console.log(`  Max has a skill system that lets him learn new capabilities. There's`);
-  console.log(`  an open source library of community skills he can install, or he can`);
-  console.log(`  write his own from scratch. Just ask him:`);
-  console.log();
-  console.log(`  ${DIM}"Check my email"${RESET}        → Max researches how, writes a skill, does it`);
-  console.log(`  ${DIM}"Turn off the lights"${RESET}   → Max finds the right CLI tool, learns it`);
-  console.log(`  ${DIM}"Find me a skill for"${RESET}   → Max searches community skills and installs one`);
-  console.log(`  ${DIM}"Learn how to use X"${RESET}    → Max proactively learns before you need it`);
-  console.log();
-  console.log(`  Skills are saved permanently — Max only needs to learn once.`);
-  console.log();
   console.log(`${CYAN}How to talk to Max:${RESET}`);
   console.log(`  • ${BOLD}Terminal${RESET}  — ${CYAN}max tui${RESET} — always available, no setup needed`);
   console.log(`  • ${BOLD}Telegram${RESET} — control Max from your phone (optional, set up next)`);
@@ -190,62 +178,6 @@ ${BOLD}╔═══════════════════════�
 
   } else {
     console.log(`\n${DIM}  Skipping Telegram. You can always set it up later with: max setup${RESET}\n`);
-  }
-
-  // ── Google (gogcli) Setup ─────────────────────────────────
-  console.log(`${BOLD}━━━ Google / Gmail Setup (optional) ━━━${RESET}\n`);
-  console.log(`Max includes a Google skill that lets him read your email, manage`);
-  console.log(`your calendar, access Drive, and more — using the ${BOLD}gog${RESET} CLI.`);
-  console.log();
-
-  const setupGoogle = await askYesNo(rl, "Would you like to set up Google services?");
-
-  if (setupGoogle) {
-    // ── Step 1: Install gog CLI ──
-    console.log(`\n${BOLD}Step 1: Install the gog CLI${RESET}\n`);
-    console.log(`  ${CYAN}brew install steipete/tap/gogcli${RESET}     ${DIM}(macOS/Linux with Homebrew)${RESET}`);
-    console.log();
-
-    await ask(rl, `  ${DIM}Press Enter when installed (or to skip)...${RESET}`);
-
-    // ── Step 2: Create OAuth credentials ──
-    console.log(`\n${BOLD}Step 2: Create OAuth credentials${RESET}\n`);
-    console.log(`  You need a Google Cloud OAuth client to authenticate:`);
-    console.log(`  1. Go to ${CYAN}https://console.cloud.google.com/apis/credentials${RESET}`);
-    console.log(`  2. Create a project (if you don't have one)`);
-    console.log(`  3. Enable the APIs you want (Gmail, Calendar, Drive, etc.)`);
-    console.log(`  4. Configure the OAuth consent screen`);
-    console.log(`  5. Create an OAuth client (type: ${BOLD}Desktop app${RESET})`);
-    console.log(`  6. Download the JSON credentials file`);
-    console.log();
-    console.log(`  Then store the credentials:`);
-    console.log(`  ${CYAN}gog auth credentials ~/Downloads/client_secret_....json${RESET}`);
-    console.log();
-
-    await ask(rl, `  ${DIM}Press Enter when done (or to skip)...${RESET}`);
-
-    // ── Step 3: Authenticate ──
-    console.log(`\n${BOLD}Step 3: Authenticate with your Google account${RESET}\n`);
-    console.log(`  Run this command to authorize:`);
-    console.log(`  ${CYAN}gog auth add your-email@gmail.com${RESET}`);
-    console.log();
-    console.log(`  This opens a browser for OAuth authorization. Once done, Max can`);
-    console.log(`  access your Google services on your behalf.`);
-    console.log();
-
-    const googleEmail = await ask(
-      rl,
-      `  Google email ${DIM}(Enter to skip)${RESET}: `
-    );
-
-    if (googleEmail.trim()) {
-      console.log(`\n  ${DIM}Run this now or later:${RESET}  ${CYAN}gog auth add ${googleEmail.trim()}${RESET}`);
-      console.log(`  ${DIM}Check status anytime:${RESET}   ${CYAN}gog auth status${RESET}`);
-    }
-
-    console.log(`\n${GREEN}  ✓ Google skill is ready — authenticate with gog auth add when you're set.${RESET}\n`);
-  } else {
-    console.log(`\n${DIM}  Skipping Google. You can always set it up later with: max setup${RESET}\n`);
   }
 
   // ── Feishu Setup ────────────────────────────────
@@ -369,8 +301,6 @@ ${BOLD}Things to try:${RESET}
 
   ${DIM}"Start working on the auth bug in ~/dev/myapp"${RESET}
   ${DIM}"What sessions are running?"${RESET}
-  ${DIM}"Find me a skill for checking Gmail"${RESET}
-  ${DIM}"Learn how to control my smart lights"${RESET}
   ${DIM}"Switch to gpt-4.1"${RESET}
 `);
 

@@ -7,7 +7,6 @@ import { config, persistModel } from "../config.js";
 import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
 import { searchIndex, parseIndex } from "../wiki/index-manager.js";
 import { readPage, ensureWikiStructure } from "../wiki/fs.js";
-import { listSkills, removeSkill } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { API_TOKEN_PATH, ensureMaxHome } from "../paths.js";
 
@@ -264,23 +263,6 @@ app.get("/memory", (_req: Request, res: Response) => {
     updated: e.updated || "",
   }));
   res.json(results);
-});
-
-// List skills
-app.get("/skills", (_req: Request, res: Response) => {
-  const skills = listSkills();
-  res.json(skills);
-});
-
-// Remove a local skill
-app.delete("/skills/:slug", (req: Request, res: Response) => {
-  const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
-  const result = removeSkill(slug);
-  if (!result.ok) {
-    res.status(400).json({ error: result.message });
-  } else {
-    res.json({ ok: true, message: result.message });
-  }
 });
 
 // Restart daemon
