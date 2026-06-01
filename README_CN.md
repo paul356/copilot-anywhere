@@ -27,7 +27,10 @@ npm install
 npm run build
 
 # 可选：设置模型（默认 claude-sonnet-4.6）
-export COPILOT_MODEL=deepseek-v4-pro
+export COPILOT_PROVIDER_BASE_URL=<YOUR PROVIDER ENDPOINT URL>
+export COPILOT_PROVIDER_TYPE=anthropic
+export COPILOT_PROVIDER_API_KEY=<YOUR API KEY>
+export COPILOT_MODEL=<YOUR MODEL NAME>
 
 # 启动 daemon
 max start
