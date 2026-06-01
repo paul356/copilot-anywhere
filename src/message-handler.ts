@@ -82,6 +82,64 @@ function stripPager(text: string): { content: string; hasPager: boolean } {
   return { content: cleaned, hasPager: true };
 }
 
+/**
+ * Find where non-overlapping new content starts in newLines by looking for the
+ * longest suffix of prevLines that matches a prefix of newLines.
+ * Returns the number of leading lines in newLines to skip.
+ */
+function findOverlapLen(prevLines: string[], newLines: string[]): number {
+  const maxOverlap = Math.min(prevLines.length, newLines.length);
+  for (let len = maxOverlap; len >= 2; len--) {
+    const prevSuffix = prevLines.slice(prevLines.length - len);
+    const newPrefix = newLines.slice(0, len);
+    if (prevSuffix.every((line, i) => line.trim() === newPrefix[i].trim())) {
+      return len;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Scroll through a pager that is currently open in the PTY, collecting all
+ * pages of content and merging them into a single string.
+ * Sends Escape when done to dismiss the pager.
+ */
+async function collectPagerContent(
+  cliProcess: CLIProcess,
+  firstPageContent: string,
+  maxPages = 30,
+): Promise<string> {
+  // PTY is 40 rows; pager content area is roughly 38 lines per screen
+  const SCROLL_LINES = 38;
+  const DOWN_ARROW = "\x1b[B";
+
+  const allLines: string[] = firstPageContent.split("\n").filter(l => l.trim());
+  let prevContent = firstPageContent;
+  let prevLines = allLines;
+
+  for (let page = 0; page < maxPages; page++) {
+    cliProcess.sendRaw(DOWN_ARROW.repeat(SCROLL_LINES));
+    const rawPage = await cliProcess.captureOutput(400, 4_000);
+    const { content: pageContent, hasPager: stillOpen } = stripPager(stripAnsi(rawPage));
+
+    if (!stillOpen || pageContent === prevContent) break;
+
+    const newLines = pageContent.split("\n").filter(l => l.trim());
+    const skipLen = findOverlapLen(prevLines, newLines);
+    const added = newLines.slice(skipLen);
+    if (added.length === 0) break; // no new content — end of pager
+
+    allLines.push(...added);
+    prevLines = newLines;
+    prevContent = pageContent;
+  }
+
+  // Dismiss the pager
+  cliProcess.sendRaw("\x1b");
+
+  return allLines.join("\n");
+}
+
 // ── Message Handler ────────────────────────────────────────────────
 
 export class MessageHandler {
@@ -326,13 +384,12 @@ export class MessageHandler {
             CLI_COMMAND_TIMEOUT_MS,
             CLI_COMMAND_SETTLE_MS,
           );
-          const { content: stripped, hasPager } = stripPager(stripAnsi(rawOutput));
-          if (hasPager) {
-            // Dismiss the interactive pager so PTY stays in a clean state
-            this.options.cliProcess.sendRaw("\x1b");
-          }
-          console.log(`[message-handler] cli-command response (${Date.now() - t0}ms, ${stripped.length} chars): ${stripped.slice(0, 120)}`);
-          callback(stripped || `(command sent: ${routed.command})`, true);
+          const { content: firstPage, hasPager } = stripPager(stripAnsi(rawOutput));
+          const result = hasPager
+            ? await collectPagerContent(this.options.cliProcess, firstPage)
+            : firstPage;
+          console.log(`[message-handler] cli-command response (${Date.now() - t0}ms, ${result.length} chars): ${result.slice(0, 120)}`);
+          callback(result || `(command sent: ${routed.command})`, true);
         } catch (err) {
           console.error(`[message-handler] cli-command failed: ${routed.command.slice(0, 80)} — ${err instanceof Error ? err.message : String(err)}`);
           // Timeout or PTY error — still confirm the command was sent

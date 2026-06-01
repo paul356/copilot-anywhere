@@ -127,6 +127,40 @@ export class CLIProcess extends EventEmitter {
     this.proc?.write(data);
   }
 
+  /**
+   * Collect PTY output for up to `timeoutMs`, resolving as soon as output
+   * has been quiet for `settleMs`. Does NOT send any input.
+   * Returns empty string if no output arrives within `settleMs`.
+   */
+  async captureOutput(settleMs = 600, timeoutMs = 5_000): Promise<string> {
+    if (!this.proc) throw new Error("CLI process not running");
+
+    return new Promise((resolve) => {
+      const chunks: string[] = [];
+      let settleTimer: NodeJS.Timeout;
+      let done = false;
+
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(totalTimeout);
+        this.off("pty-output", onData);
+        resolve(chunks.join(""));
+      };
+
+      const onData = (data: string) => {
+        if (done) return;
+        chunks.push(data);
+        clearTimeout(settleTimer);
+        settleTimer = setTimeout(finish, settleMs);
+      };
+
+      const totalTimeout = setTimeout(finish, timeoutMs);
+      settleTimer = setTimeout(finish, settleMs); // resolve empty if nothing comes
+      this.on("pty-output", onData);
+    });
+  }
+
   /** Graceful stop — send SIGTERM, force kill after timeout */
   async stop(): Promise<void> {
     if (!this.proc) return;
