@@ -256,7 +256,6 @@ ${BOLD}╔═══════════════════════�
 
   let feishuAppId = existing.FEISHU_APP_ID || "";
   let feishuAppSecret = existing.FEISHU_APP_SECRET || "";
-  let feishuSecretCode = existing.FEISHU_SECRET_CODE || "";
   let feishuDomain = (existing.FEISHU_DOMAIN as "feishu" | "lark" | undefined) || "feishu";
 
   const setupFeishu = await askYesNo(rl, "Would you like to set up Feishu?");
@@ -296,28 +295,13 @@ ${BOLD}╔═══════════════════════�
       `  App Secret${feishuAppSecret ? ` ${DIM}(current set)${RESET}` : ""}: `
     );
 
-    // ── Step 3: Set a secret code ──
-    console.log(`\n${BOLD}Step 3: Set a secret code${RESET}\n`);
-    console.log(`${YELLOW}  ⚠  IMPORTANT: anyone who finds your bot can DM it.${RESET}`);
-    console.log(`  Max uses a ${BOLD}secret code${RESET} to identify you. The first person to DM`);
-    console.log(`  your bot with this exact code will be permanently authorized.`);
-    console.log();
-    console.log(`  Choose something hard to guess — like a short passphrase.`);
-    console.log(`  Example: ${DIM}sunny-rabbit-42${RESET}`);
-    console.log();
-    console.log(`  After Max starts, open Feishu, DM your bot with this code,`);
-    console.log(`  and Max will recognize you automatically.`);
+    // ── Step 3: Pairing ──
+    console.log(`\n${BOLD}Step 3: Pair your Feishu account${RESET}\n`);
+    console.log(`  When Max starts, it will print a one-time ${BOLD}pairing code${RESET} in the terminal.`);
+    console.log(`  DM that code to your bot in Feishu and Max will authorize you automatically.`);
+    console.log(`  The code is generated fresh every startup and is never stored.`);
     console.log();
 
-    feishuSecretCode = await askRequired(
-      rl,
-      `  Secret code${feishuSecretCode ? ` ${DIM}(current set, Enter to keep)${RESET}` : ""}: `
-    );
-    if (!feishuSecretCode && existing.FEISHU_SECRET_CODE) {
-      feishuSecretCode = existing.FEISHU_SECRET_CODE;
-    }
-
-    console.log(`\n${GREEN}  ✓ Secret code set. DM your bot with it to authorize yourself.${RESET}\n`);
   } else {
     console.log(`\n${DIM}  Skipping Feishu. You can always set it up later with: max setup${RESET}\n`);
   }
@@ -348,7 +332,6 @@ ${BOLD}╔═══════════════════════�
   if (telegramToken) lines.push(`TELEGRAM_BOT_TOKEN=${telegramToken}`);
   if (userId) lines.push(`AUTHORIZED_USER_ID=${userId}`);  if (feishuAppId) lines.push(`FEISHU_APP_ID=${feishuAppId}`);
   if (feishuAppSecret) lines.push(`FEISHU_APP_SECRET=${feishuAppSecret}`);
-  if (feishuSecretCode) lines.push(`FEISHU_SECRET_CODE=${feishuSecretCode}`);
   if (existing.FEISHU_AUTHORIZED_OPEN_ID) lines.push(`FEISHU_AUTHORIZED_OPEN_ID=${existing.FEISHU_AUTHORIZED_OPEN_ID}`);
   if (feishuAppId || feishuAppSecret) lines.push(`FEISHU_DOMAIN=${feishuDomain}`);  lines.push(`API_PORT=${apiPort}`);
   lines.push(`COPILOT_MODEL=${model}`);
@@ -357,7 +340,7 @@ ${BOLD}╔═══════════════════════�
 
   const chatDestinations: string[] = [];
   if (telegramToken && userId) chatDestinations.push("Telegram");
-  if (feishuAppId && feishuAppSecret && feishuSecretCode) {
+  if (feishuAppId && feishuAppSecret) {
     chatDestinations.push(feishuDomain === "lark" ? "Lark" : "Feishu");
   }
   const chatLabel =

@@ -16,7 +16,6 @@ const configSchema = z.object({
   FEISHU_APP_ID: z.string().min(1).optional(),
   FEISHU_APP_SECRET: z.string().min(1).optional(),
   FEISHU_AUTHORIZED_OPEN_ID: z.string().min(1).optional(),
-  FEISHU_SECRET_CODE: z.string().min(1).optional(),
   FEISHU_DOMAIN: z.enum(["feishu", "lark"]).optional(),
   COPILOT_UI_SERVER_PORT: z.string().optional(),
 });
@@ -56,7 +55,6 @@ export const config = {
   workerTimeoutMs: parsedWorkerTimeout,
   feishuAppId: raw.FEISHU_APP_ID,
   feishuAppSecret: raw.FEISHU_APP_SECRET,
-  feishuSecretCode: raw.FEISHU_SECRET_CODE,
   feishuDomain: raw.FEISHU_DOMAIN ?? "feishu",
   get feishuAuthorizedOpenId(): string | undefined {
     return _feishuAuthorizedOpenId;
@@ -77,8 +75,7 @@ export const config = {
     return !!this.telegramBotToken && this.authorizedUserId !== undefined;
   },
   get feishuEnabled(): boolean {
-    return !!this.feishuAppId && !!this.feishuAppSecret &&
-      (!!this.feishuAuthorizedOpenId || !!this.feishuSecretCode);
+    return !!this.feishuAppId && !!this.feishuAppSecret;
   },
   get selfEditEnabled(): boolean {
     return process.env.MAX_SELF_EDIT === "1";
@@ -115,4 +112,16 @@ export function persistModel(model: string): void {
 /** Persist a newly registered Feishu user's open_id to ~/.max/.env */
 export function persistFeishuAuthorizedOpenId(openId: string): void {
   persistEnvVar("FEISHU_AUTHORIZED_OPEN_ID", openId);
+}
+
+/** Clear the paired Feishu open_id from memory and ~/.max/.env */
+export function clearFeishuAuthorizedOpenId(): void {
+  _feishuAuthorizedOpenId = undefined;
+  try {
+    const content = readFileSync(ENV_PATH, "utf-8");
+    const lines = content.split("\n").filter((l) => !l.startsWith("FEISHU_AUTHORIZED_OPEN_ID="));
+    writeFileSync(ENV_PATH, lines.join("\n"));
+  } catch {
+    // File may not exist — nothing to clear
+  }
 }

@@ -1,5 +1,5 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { config, persistFeishuAuthorizedOpenId } from "../config.js";
+import { config, persistFeishuAuthorizedOpenId, clearFeishuAuthorizedOpenId } from "../config.js";
 import { route, RoutedMessage, executeMaxCommand, CommandResult } from "../command-router.js";
 import { MessageHandler } from "../message-handler.js";
 import { buildCardContent, buildTextContent, buildQuestionCard, chunkMessage } from "./formatter.js";
@@ -16,9 +16,39 @@ interface PendingQuestion {
   cleanupTimer: ReturnType<typeof setTimeout>;
 }
 
+/** One-time pairing token — generated on demand, cleared after use or expiry. */
+let pairingToken: string | undefined;
+let pairingTokenTimer: ReturnType<typeof setTimeout> | undefined;
+
+const PAIRING_TOKEN_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function generatePairingToken(): string {
+  const words = ["alpha","bravo","charlie","delta","echo","foxtrot","golf","hotel",
+    "india","juliet","kilo","lima","mike","november","oscar","papa","quebec",
+    "romeo","sierra","tango","uniform","victor","whiskey","xray","yankee","zulu"];
+  const pick = () => words[Math.floor(Math.random() * words.length)];
+  const num = Math.floor(100 + Math.random() * 900);
+  return `${pick()}-${pick()}-${num}`;
+}
+
+function activatePairingToken(): string {
+  if (pairingTokenTimer) clearTimeout(pairingTokenTimer);
+  pairingToken = generatePairingToken();
+  pairingTokenTimer = setTimeout(() => {
+    pairingToken = undefined;
+    pairingTokenTimer = undefined;
+    console.log("[max] Feishu pairing code expired.");
+  }, PAIRING_TOKEN_TTL_MS);
+  return pairingToken;
+}
+
+function invalidatePairingToken(): void {
+  if (pairingTokenTimer) { clearTimeout(pairingTokenTimer); pairingTokenTimer = undefined; }
+  pairingToken = undefined;
+}
+
 /** openId → pending question waiting for user input */
 const pendingQuestions = new Map<string, PendingQuestion>();
-
 function clearPending(openId: string): PendingQuestion | undefined {
   const pending = pendingQuestions.get(openId);
   if (pending) {
@@ -237,11 +267,6 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       "Feishu credentials are missing. Run 'max setup' and enter your Feishu App ID and App Secret."
     );
   }
-  if (!config.feishuAuthorizedOpenId && !config.feishuSecretCode) {
-    throw new Error(
-      "Feishu is not configured. Run 'max setup' and set a secret code to authorize yourself."
-    );
-  }
 
   const domain = resolveDomain(config.feishuDomain);
 
@@ -269,27 +294,40 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       if (event.message.chat_type !== "p2p") return; // group chats not supported
 
       if (config.feishuAuthorizedOpenId) {
-        // Registered: strict single-user check
-        if (senderOpenId !== config.feishuAuthorizedOpenId) return;
-      } else if (config.feishuSecretCode) {
-        // Waiting for first-time registration via secret code
+        // Already paired — only the paired user is allowed
+        if (senderOpenId !== config.feishuAuthorizedOpenId) return; // silently ignore
+      } else {
+        // Not yet paired — handle pairing flow
         if (event.message.message_type === "text") {
           const rawText = extractText(event.message.content);
-          const text = stripMentions(rawText);
-          if (text === config.feishuSecretCode) {
+          const text = stripMentions(rawText).trim();
+
+          if (pairingToken && text === pairingToken) {
+            // Correct code — register this user
+            invalidatePairingToken();
             config.feishuAuthorizedOpenId = senderOpenId;
             persistFeishuAuthorizedOpenId(senderOpenId);
-            console.log(`[max] Feishu user registered: ${senderOpenId}`);
+            console.log(`[max] Feishu user paired: ${senderOpenId}`);
             await sendChunkedReply(
               event.message.message_id,
               event.message.chat_id,
-              "✅ 已授权！您现在可以与 Max 对话了。\n✅ Authorized! You can now control Max."
+              "✅ 已配对！您现在可以与 Max 对话了。\n✅ Paired! You can now control Max."
+            );
+          } else {
+            // Generate a new pairing code (or reuse unexpired one) and prompt
+            const code = pairingToken ?? activatePairingToken();
+            console.log(
+              `\n[max] ⚡ Feishu pairing code: \x1b[1;33m${code}\x1b[0m\n` +
+              `[max]    DM this code to the bot to pair. Expires in 5 minutes.\n`
+            );
+            await sendChunkedReply(
+              event.message.message_id,
+              event.message.chat_id,
+              "🔒 请输入终端显示的配对码以完成授权。\n🔒 Please enter the pairing code shown in the terminal."
             );
           }
         }
-        return; // don't process further until registered
-      } else {
-        return;
+        return; // don't process further until paired
       }
 
       // v1: group chats check already done above.
@@ -310,6 +348,18 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
       // Skip duplicate messages (Feishu retries events if handler takes >3s)
       if (isDuplicate(event.message.message_id)) return;
+
+      // ── /max:unpair ────────────────────────────────────────
+      if (text.trim() === "/max:unpair") {
+        clearFeishuAuthorizedOpenId();
+        console.log("[max] Feishu user unpaired.");
+        await sendChunkedReply(
+          event.message.message_id,
+          event.message.chat_id,
+          "🔓 已解除配对。下次有人 DM 时 Max 会显示新的配对码。\n🔓 Unpaired. Max will show a new pairing code on the next DM."
+        );
+        return;
+      }
 
       // ── Pending question: route text as an answer ──────────────
       const pending = pendingQuestions.get(senderOpenId);
@@ -369,7 +419,11 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
 export async function startBot(): Promise<void> {
   if (!wsClient || !eventDispatcher) throw new Error("Feishu bot not created");
-  console.log("[max] Feishu bot starting...");
+  if (config.feishuAuthorizedOpenId) {
+    console.log("[max] Feishu bot starting (already paired)...");
+  } else {
+    console.log("[max] Feishu bot starting (not yet paired — DM the bot to get a pairing code)...");
+  }
   // WSClient.start is fire-and-forget — it manages its own reconnect loop.
   try {
     wsClient.start({ eventDispatcher });
