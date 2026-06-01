@@ -16,6 +16,7 @@ const configSchema = z.object({
   FEISHU_APP_ID: z.string().min(1).optional(),
   FEISHU_APP_SECRET: z.string().min(1).optional(),
   FEISHU_AUTHORIZED_OPEN_ID: z.string().min(1).optional(),
+  FEISHU_SECRET_CODE: z.string().min(1).optional(),
   FEISHU_DOMAIN: z.enum(["feishu", "lark"]).optional(),
   COPILOT_UI_SERVER_PORT: z.string().optional(),
 });
@@ -46,6 +47,7 @@ if (!Number.isInteger(parsedWorkerTimeout) || parsedWorkerTimeout <= 0) {
 export const DEFAULT_MODEL = "claude-sonnet-4.6";
 
 let _copilotModel = raw.COPILOT_MODEL || DEFAULT_MODEL;
+let _feishuAuthorizedOpenId = raw.FEISHU_AUTHORIZED_OPEN_ID;
 
 export const config = {
   telegramBotToken: raw.TELEGRAM_BOT_TOKEN,
@@ -54,8 +56,14 @@ export const config = {
   workerTimeoutMs: parsedWorkerTimeout,
   feishuAppId: raw.FEISHU_APP_ID,
   feishuAppSecret: raw.FEISHU_APP_SECRET,
-  feishuAuthorizedOpenId: raw.FEISHU_AUTHORIZED_OPEN_ID,
+  feishuSecretCode: raw.FEISHU_SECRET_CODE,
   feishuDomain: raw.FEISHU_DOMAIN ?? "feishu",
+  get feishuAuthorizedOpenId(): string | undefined {
+    return _feishuAuthorizedOpenId;
+  },
+  set feishuAuthorizedOpenId(v: string) {
+    _feishuAuthorizedOpenId = v;
+  },
   get copilotUiServerPort(): number {
     return parseInt(raw.COPILOT_UI_SERVER_PORT || "9999", 10);
   },
@@ -69,7 +77,8 @@ export const config = {
     return !!this.telegramBotToken && this.authorizedUserId !== undefined;
   },
   get feishuEnabled(): boolean {
-    return !!this.feishuAppId && !!this.feishuAppSecret && !!this.feishuAuthorizedOpenId;
+    return !!this.feishuAppId && !!this.feishuAppSecret &&
+      (!!this.feishuAuthorizedOpenId || !!this.feishuSecretCode);
   },
   get selfEditEnabled(): boolean {
     return process.env.MAX_SELF_EDIT === "1";
@@ -101,4 +110,9 @@ function persistEnvVar(key: string, value: string): void {
 /** Persist the current model choice to ~/.max/.env */
 export function persistModel(model: string): void {
   persistEnvVar("COPILOT_MODEL", model);
+}
+
+/** Persist a newly registered Feishu user's open_id to ~/.max/.env */
+export function persistFeishuAuthorizedOpenId(openId: string): void {
+  persistEnvVar("FEISHU_AUTHORIZED_OPEN_ID", openId);
 }

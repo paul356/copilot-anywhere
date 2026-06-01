@@ -256,7 +256,7 @@ ${BOLD}╔═══════════════════════�
 
   let feishuAppId = existing.FEISHU_APP_ID || "";
   let feishuAppSecret = existing.FEISHU_APP_SECRET || "";
-  let feishuOpenId = existing.FEISHU_AUTHORIZED_OPEN_ID || "";
+  let feishuSecretCode = existing.FEISHU_SECRET_CODE || "";
   let feishuDomain = (existing.FEISHU_DOMAIN as "feishu" | "lark" | undefined) || "feishu";
 
   const setupFeishu = await askYesNo(rl, "Would you like to set up Feishu?");
@@ -296,37 +296,28 @@ ${BOLD}╔═══════════════════════�
       `  App Secret${feishuAppSecret ? ` ${DIM}(current set)${RESET}` : ""}: `
     );
 
-    // ── Step 3: Lock down to your open_id ──
-    console.log(`\n${BOLD}Step 3: Lock down your bot${RESET}\n`);
+    // ── Step 3: Set a secret code ──
+    console.log(`\n${BOLD}Step 3: Set a secret code${RESET}\n`);
     console.log(`${YELLOW}  ⚠  IMPORTANT: anyone who finds your bot can DM it.${RESET}`);
-    console.log(`  Max uses your Feishu ${BOLD}open_id${RESET} to ensure only YOU can control it.`);
+    console.log(`  Max uses a ${BOLD}secret code${RESET} to identify you. The first person to DM`);
+    console.log(`  your bot with this exact code will be permanently authorized.`);
     console.log();
-    console.log(`  To find your open_id:`);
-    console.log(`  1. Open ${CYAN}${consoleUrl}/document/server-docs/api-call-guide/api-explorer${RESET}`);
-    console.log(`     (Developer Console → ${BOLD}API Debugger${RESET} / ${BOLD}API Explorer${RESET})`);
-    console.log(`  2. Pick the API ${CYAN}contact.v3.user.batch_get_id${RESET}`);
-    console.log(`  3. Authorize as your app, set ${BOLD}user_id_type=open_id${RESET},`);
-    console.log(`     and pass your mobile number or email in the request body`);
-    console.log(`  4. Copy the returned ${BOLD}open_id${RESET} (looks like ${DIM}ou_abc123...${RESET})`);
+    console.log(`  Choose something hard to guess — like a short passphrase.`);
+    console.log(`  Example: ${DIM}sunny-rabbit-42${RESET}`);
     console.log();
-    console.log(`  ${DIM}Tip: you can also see open_ids of test users under${RESET}`);
-    console.log(`  ${DIM}Developer Console → your app → Test Users.${RESET}`);
+    console.log(`  After Max starts, open Feishu, DM your bot with this code,`);
+    console.log(`  and Max will recognize you automatically.`);
     console.log();
 
-    while (true) {
-      const openIdInput = await askRequired(
-        rl,
-        `  Your open_id${feishuOpenId ? ` ${DIM}(current: ${feishuOpenId})${RESET}` : ""}: `
-      );
-      if (/^ou_[A-Za-z0-9]+$/.test(openIdInput.trim())) {
-        feishuOpenId = openIdInput.trim();
-        break;
-      }
-      console.log(`${YELLOW}  That doesn't look like an open_id. It should start with 'ou_'.${RESET}`);
+    feishuSecretCode = await askRequired(
+      rl,
+      `  Secret code${feishuSecretCode ? ` ${DIM}(current set, Enter to keep)${RESET}` : ""}: `
+    );
+    if (!feishuSecretCode && existing.FEISHU_SECRET_CODE) {
+      feishuSecretCode = existing.FEISHU_SECRET_CODE;
     }
 
-    console.log(`\n${GREEN}  ✓ Feishu locked down — only ${feishuOpenId} can control Max.${RESET}`);
-    console.log(`${DIM}    Credentials are saved now and will be verified when Max starts.${RESET}\n`);
+    console.log(`\n${GREEN}  ✓ Secret code set. DM your bot with it to authorize yourself.${RESET}\n`);
   } else {
     console.log(`\n${DIM}  Skipping Feishu. You can always set it up later with: max setup${RESET}\n`);
   }
@@ -357,15 +348,16 @@ ${BOLD}╔═══════════════════════�
   if (telegramToken) lines.push(`TELEGRAM_BOT_TOKEN=${telegramToken}`);
   if (userId) lines.push(`AUTHORIZED_USER_ID=${userId}`);  if (feishuAppId) lines.push(`FEISHU_APP_ID=${feishuAppId}`);
   if (feishuAppSecret) lines.push(`FEISHU_APP_SECRET=${feishuAppSecret}`);
-  if (feishuOpenId) lines.push(`FEISHU_AUTHORIZED_OPEN_ID=${feishuOpenId}`);
-  if (feishuAppId || feishuAppSecret || feishuOpenId) lines.push(`FEISHU_DOMAIN=${feishuDomain}`);  lines.push(`API_PORT=${apiPort}`);
+  if (feishuSecretCode) lines.push(`FEISHU_SECRET_CODE=${feishuSecretCode}`);
+  if (existing.FEISHU_AUTHORIZED_OPEN_ID) lines.push(`FEISHU_AUTHORIZED_OPEN_ID=${existing.FEISHU_AUTHORIZED_OPEN_ID}`);
+  if (feishuAppId || feishuAppSecret) lines.push(`FEISHU_DOMAIN=${feishuDomain}`);  lines.push(`API_PORT=${apiPort}`);
   lines.push(`COPILOT_MODEL=${model}`);
 
   writeFileSync(ENV_PATH, lines.join("\n") + "\n");
 
   const chatDestinations: string[] = [];
   if (telegramToken && userId) chatDestinations.push("Telegram");
-  if (feishuAppId && feishuAppSecret && feishuOpenId) {
+  if (feishuAppId && feishuAppSecret && feishuSecretCode) {
     chatDestinations.push(feishuDomain === "lark" ? "Lark" : "Feishu");
   }
   const chatLabel =

@@ -1,5 +1,5 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { config } from "../config.js";
+import { config, persistFeishuAuthorizedOpenId } from "../config.js";
 import { route, RoutedMessage, executeMaxCommand, CommandResult } from "../command-router.js";
 import { MessageHandler } from "../message-handler.js";
 import { buildCardContent, buildTextContent, buildQuestionCard, chunkMessage } from "./formatter.js";
@@ -237,9 +237,9 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       "Feishu credentials are missing. Run 'max setup' and enter your Feishu App ID and App Secret."
     );
   }
-  if (!config.feishuAuthorizedOpenId) {
+  if (!config.feishuAuthorizedOpenId && !config.feishuSecretCode) {
     throw new Error(
-      "Feishu authorized open_id is missing. Run 'max setup' and enter the open_id of the user allowed to control Max."
+      "Feishu is not configured. Run 'max setup' and set a secret code to authorize yourself."
     );
   }
 
@@ -264,15 +264,35 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       const event = data as MessageReceiveEvent;
       const senderOpenId = event.sender?.sender_id?.open_id;
 
-      // Auth: only the configured user may control Max.
-      if (!senderOpenId || senderOpenId !== config.feishuAuthorizedOpenId) {
+      // ── Authorization ─────────────────────────────────────
+      if (!senderOpenId) return;
+      if (event.message.chat_type !== "p2p") return; // group chats not supported
+
+      if (config.feishuAuthorizedOpenId) {
+        // Registered: strict single-user check
+        if (senderOpenId !== config.feishuAuthorizedOpenId) return;
+      } else if (config.feishuSecretCode) {
+        // Waiting for first-time registration via secret code
+        if (event.message.message_type === "text") {
+          const rawText = extractText(event.message.content);
+          const text = stripMentions(rawText);
+          if (text === config.feishuSecretCode) {
+            config.feishuAuthorizedOpenId = senderOpenId;
+            persistFeishuAuthorizedOpenId(senderOpenId);
+            console.log(`[max] Feishu user registered: ${senderOpenId}`);
+            await sendChunkedReply(
+              event.message.message_id,
+              event.message.chat_id,
+              "✅ 已授权！您现在可以与 Max 对话了。\n✅ Authorized! You can now control Max."
+            );
+          }
+        }
+        return; // don't process further until registered
+      } else {
         return;
       }
 
-      // v1: ignore group chats entirely (matches Telegram's single-user model).
-      if (event.message.chat_type !== "p2p") {
-        return;
-      }
+      // v1: group chats check already done above.
 
       // v1: only handle plain text messages.
       if (event.message.message_type !== "text") {
