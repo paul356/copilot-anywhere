@@ -70,7 +70,7 @@ function stripAnsi(text: string): string {
  * Returns the cleaned content and whether a pager was detected.
  */
 function stripPager(text: string): { content: string; hasPager: boolean } {
-  const hasPager = text.includes("esc close") || /┃\s*$/.test(text);
+  const hasPager = text.includes("esc close") || text.includes("┃");
   if (!hasPager) return { content: text, hasPager: false };
 
   // Remove the scroll hint line and all box border characters
