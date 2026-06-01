@@ -106,8 +106,9 @@ ${BOLD}╔═══════════════════════�
   console.log(`  • See and attach to any Copilot session on your machine`);
   console.log();
   console.log(`${CYAN}How to talk to Max:${RESET}`);
-  console.log(`  • ${BOLD}Terminal${RESET}  — ${CYAN}max tui${RESET} — always available, no setup needed`);
-  console.log(`  • ${BOLD}Telegram${RESET} — control Max from your phone (optional, set up next)`);
+  console.log(`  • ${BOLD}Terminal${RESET} — ${CYAN}max tui${RESET} — always available, no setup needed`);
+  console.log(`  • ${BOLD}Telegram${RESET} — control Max from your phone (optional)`);
+  console.log(`  • ${BOLD}Feishu${RESET}   — for users in mainland China (optional)`);
   console.log();
 
   await ask(rl, `${DIM}Press Enter to continue...${RESET}`);
@@ -229,9 +230,10 @@ ${BOLD}╔═══════════════════════�
 
     // ── Step 3: Pairing ──
     console.log(`\n${BOLD}Step 3: Pair your Feishu account${RESET}\n`);
-    console.log(`  When Max starts, it will print a one-time ${BOLD}pairing code${RESET} in the terminal.`);
-    console.log(`  DM that code to your bot in Feishu and Max will authorize you automatically.`);
-    console.log(`  The code is generated fresh every startup and is never stored.`);
+    console.log(`  When your bot receives a DM from an unpaired user, it generates a`);
+    console.log(`  one-time ${BOLD}pairing code${RESET} valid for 5 minutes and prints it in the terminal.`);
+    console.log(`  Send that code back to the bot and Max will authorize you automatically.`);
+    console.log(`  Only one account can be paired at a time. Use /max:unpair to reset.`);
     console.log();
 
   } else {
@@ -262,10 +264,12 @@ ${BOLD}╔═══════════════════════�
   const apiPort = existing.API_PORT || "7777";
   const lines: string[] = [];
   if (telegramToken) lines.push(`TELEGRAM_BOT_TOKEN=${telegramToken}`);
-  if (userId) lines.push(`AUTHORIZED_USER_ID=${userId}`);  if (feishuAppId) lines.push(`FEISHU_APP_ID=${feishuAppId}`);
+  if (userId) lines.push(`AUTHORIZED_USER_ID=${userId}`);
+  if (feishuAppId) lines.push(`FEISHU_APP_ID=${feishuAppId}`);
   if (feishuAppSecret) lines.push(`FEISHU_APP_SECRET=${feishuAppSecret}`);
   if (existing.FEISHU_AUTHORIZED_OPEN_ID) lines.push(`FEISHU_AUTHORIZED_OPEN_ID=${existing.FEISHU_AUTHORIZED_OPEN_ID}`);
-  if (feishuAppId || feishuAppSecret) lines.push(`FEISHU_DOMAIN=${feishuDomain}`);  lines.push(`API_PORT=${apiPort}`);
+  if (feishuAppId || feishuAppSecret) lines.push(`FEISHU_DOMAIN=${feishuDomain}`);
+  lines.push(`API_PORT=${apiPort}`);
   lines.push(`COPILOT_MODEL=${model}`);
 
   writeFileSync(ENV_PATH, lines.join("\n") + "\n");
@@ -294,8 +298,8 @@ ${BOLD}Get started:${RESET}
   ${CYAN}2.${RESET} Start Max:
      ${BOLD}max start${RESET}
 
-    ${CYAN}3.${RESET} ${chatLabel}
-      ${BOLD}${chatCommand}${RESET}
+  ${CYAN}3.${RESET} ${chatLabel}
+     ${BOLD}${chatCommand}${RESET}
 
 ${BOLD}Things to try:${RESET}
 
