@@ -269,7 +269,10 @@ function findOverlapLen(prevLines: string[], newLines: string[]): number {
   for (let len = maxOverlap; len >= 2; len--) {
     const prevSuffix = prevLines.slice(prevLines.length - len);
     const newPrefix = newLines.slice(0, len);
-    if (prevSuffix.every((line, i) => line.trim() === newPrefix[i].trim())) {
+    // Allow up to 10% mismatches to tolerate TUI status-bar contamination
+    // (the TUI sometimes overwrites a pager row with status bar text between captures)
+    const mismatches = prevSuffix.filter((line, i) => line.trim() !== newPrefix[i].trim()).length;
+    if (mismatches <= Math.max(1, Math.floor(len * 0.1))) {
       return len;
     }
   }
@@ -294,8 +297,10 @@ async function collectPagerContent(
   const DOWN_ARROW = "\x1b[B";
 
   const allLines: string[] = firstPageContent.split("\n").filter(l => l.trim());
+  // Guard against re-adding lines already collected (handles end-of-pager repeats)
+  const seenLines = new Set<string>(allLines.map(l => l.trim()));
   let prevContent = firstPageContent;
-  let prevLines = allLines;
+  let prevLines = allLines.slice();
 
   for (let page = 0; page < maxPages; page++) {
     cliProcess.sendRaw(DOWN_ARROW.repeat(SCROLL_LINES));
@@ -312,9 +317,10 @@ async function collectPagerContent(
 
     const newLines = pageContent.split("\n").filter(l => l.trim());
     const skipLen = findOverlapLen(prevLines, newLines);
-    const added = newLines.slice(skipLen);
+    const added = newLines.slice(skipLen).filter(l => !seenLines.has(l.trim()));
     if (added.length === 0) break;
 
+    added.forEach(l => seenLines.add(l.trim()));
     allLines.push(...added);
     prevLines = newLines;
     prevContent = pageContent;
