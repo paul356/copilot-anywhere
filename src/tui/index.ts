@@ -437,7 +437,7 @@ function showStatus(model?: string, skillCount?: number, routerInfo?: { enabled:
   if (skillCount !== undefined) parts.push(`${C.dim("skills:")} ${C.cyan(String(skillCount))}`);
   if (parts.length) console.log(`    ${parts.join("    ")}`);
   console.log();
-  console.log(C.dim("    /max:help for max commands · /help for copilot commands · esc to cancel"));
+  console.log(C.dim("    /max:help for max commands · all other /commands go to copilot · esc to cancel"));
   console.log();
 }
 
@@ -820,167 +820,17 @@ function sendCancel(): void {
 }
 
 // ── Command handlers ──────────────────────────────────────
-function cmdAgents(): void {
-  apiGet("/agents", (workers: any[]) => {
-    if (!workers || workers.length === 0) {
-      console.log(C.dim("  No workers running.\n"));
-    } else {
-      for (const w of workers) {
-        console.log(`  ${C.green("●")}  ${C.bold("@" + w.slug)}  ${C.dim("(" + w.model + ")")}  ${w.description || ""}`);
-      }
-      console.log();
-    }
-  });
-}
-
-function cmdModel(arg: string): void {
-  if (arg) {
-    apiPost("/model", { model: arg }, (data: any) => {
-      if (data.error) {
-        console.log(C.red(`  Error: ${data.error}\n`));
-      } else {
-        console.log(`  ${C.dim("model:")} ${C.dim(data.previous)} → ${C.cyan(data.current)}\n`);
-      }
-    });
-  } else {
-    apiGet("/model", (data: any) => {
-      console.log(`  ${C.dim("model:")} ${C.cyan(data.model)}\n`);
-    });
-  }
-}
-
-function cmdModels(): void {
-  apiGet("/models", (data: any) => {
-    if (data.error) {
-      console.log(C.red(`  Error: ${data.error}\n`));
-      return;
-    }
-    const models: string[] = data.models ?? [];
-    const current: string = data.current ?? "";
-    if (models.length === 0) {
-      console.log(C.dim("  No models available.\n"));
-      return;
-    }
-    console.log();
-    for (const id of models) {
-      const marker = id === current ? C.dim(" ← current") : "";
-      console.log(`  ${C.cyan(id)}${marker}`);
-    }
-    console.log();
-  });
-}
-
-function cmdMemory(): void {
-  apiGet("/memory", (memories: any[]) => {
-    if (!memories || memories.length === 0) {
-      console.log(C.dim("  No memories stored.\n"));
-    } else {
-      for (const m of memories) {
-        const cat = C.magenta(`[${m.category}]`);
-        console.log(`  ${C.dim(`#${m.id}`)} ${cat} ${m.content}`);
-      }
-      console.log(C.dim(`\n  ${memories.length} memories total.\n`));
-    }
-  });
-}
-
-function cmdSkills(): void {
-  apiGet("/skills", (skills: any[]) => {
-    if (!skills || skills.length === 0) {
-      console.log(C.dim("  No skills installed.\n"));
-      return;
-    }
-
-    // Build table
-    const localSkills: { idx: number; slug: string }[] = [];
-    console.log();
-    console.log(`  ${C.boldWhite("#")}   ${C.boldWhite("Skill")}${" ".repeat(24)}${C.boldWhite("Source")}      ${C.boldWhite("Description")}`);
-    console.log(C.dim("  " + "─".repeat(72)));
-
-    for (let i = 0; i < skills.length; i++) {
-      const s = skills[i];
-      const num = String(i + 1).padStart(2);
-      const name = s.name.padEnd(28).slice(0, 28);
-      const src = s.source === "bundled" ? C.dim("bundled")
-        : s.source === "local" ? C.green("local")
-        : C.cyan("global");
-      const srcPad = s.source.padEnd(10);
-      const desc = (s.description || "").slice(0, 40);
-
-      if (s.source === "local") {
-        localSkills.push({ idx: i + 1, slug: s.slug });
-        console.log(`  ${C.cyan(num)}  ${name} ${src}${" ".repeat(Math.max(0, 10 - s.source.length))} ${C.dim(desc)}`);
-      } else {
-        console.log(`  ${C.dim(num)}  ${name} ${src}${" ".repeat(Math.max(0, 10 - s.source.length))} ${C.dim(desc)}`);
-      }
-    }
-
-    console.log();
-
-    if (localSkills.length === 0) {
-      console.log(C.dim("  No local skills to uninstall.\n"));
-      return;
-    }
-
-    console.log(C.dim(`  Type a number to uninstall a local skill, or press Enter to go back.`));
-    rl.question(`  ${C.coral("uninstall #")} `, (answer) => {
-      const trimmed = answer.trim();
-      if (!trimmed) {
-        console.log();
-        rl.prompt();
-        return;
-      }
-
-      const num = /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : NaN;
-      const match = localSkills.find((s) => s.idx === num);
-      if (!match) {
-        console.log(C.yellow(`  Invalid selection. Only local skills (highlighted) can be uninstalled.\n`));
-        rl.prompt();
-        return;
-      }
-
-      apiDelete(`/skills/${encodeURIComponent(match.slug)}`, (data: any) => {
-        if (data.error) {
-          console.log(C.red(`  Error: ${data.error}\n`));
-        } else {
-          console.log(C.green(`  ✓ Removed '${match.slug}'\n`));
-        }
-      });
-    });
-  });
-}
-
-function cmdAuto(): void {
-  apiGetSilent("/auto", (data: any) => {
-    if (!data) { rl.prompt(); return; }
-    const newState = !data.enabled;
-    apiPost("/auto", { enabled: newState }, () => {
-      const label = newState
-        ? `${C.green("⚡")} auto on`
-        : `auto off · using ${C.cyan(data.currentModel)}`;
-      console.log(`  ${label}\n`);
-    });
-  });
-}
-
 function cmdHelp(): void {
   console.log();
   console.log(C.boldWhite("    MAX COMMANDS"));
   console.log();
   console.log(`    ${C.coral("/max:help")}              show this help`);
-  console.log(`    ${C.coral("/model")} ${C.dim("[name]")}        show or switch model`);
-  console.log(`    ${C.coral("/models")}               list all available models`);
-  console.log(`    ${C.coral("/auto")}                 toggle auto model routing`);
-  console.log(`    ${C.coral("/memory")}               show stored memories`);
-  console.log(`    ${C.coral("/skills")}               list installed skills`);
-  console.log(`    ${C.coral("/agents")}               list available agents`);
-  console.log(`    ${C.coral("/copy")}                 copy last response`);
-  console.log(`    ${C.coral("/status")}               daemon health check`);
-  console.log(`    ${C.coral("/restart")}              restart daemon`);
-  console.log(`    ${C.coral("/clear")}                clear screen`);
-  console.log(`    ${C.coral("/quit")}                 exit`);
+  console.log(`    ${C.coral("/max:copy")}              copy last response`);
+  console.log(`    ${C.coral("/max:restart")}           restart daemon`);
+  console.log(`    ${C.coral("/max:clear")}             clear screen`);
+  console.log(`    ${C.coral("/quit")}  ${C.coral("/exit")}          exit`);
   console.log();
-  console.log(C.dim("    /help is forwarded to the Copilot agent for its built-in commands"));
+  console.log(C.dim("    all other /commands are forwarded to the Copilot agent"));
   console.log(C.dim("    press escape to cancel a running response"));
   console.log(C.dim("    set MAX_TUI_DEBUG=1 to write lifecycle logs to ~/.max/tui-debug.log"));
   console.log();
@@ -1054,42 +904,28 @@ setTimeout(() => {
       });
     }
 
-    if (trimmed === "/quit" || trimmed === "/exit") {
+    if (trimmed === "/quit" || trimmed === "/exit" || trimmed === "/max:quit" || trimmed === "/max:exit") {
       trimHistoryFile();
       console.log(C.dim("\n    bye.\n"));
       process.exit(0);
     }
 
-    if (trimmed === "/cancel") { sendCancel(); return; }
-    if (trimmed === "/agents" || trimmed === "/sessions" || trimmed === "/workers") { cmdAgents(); return; }
-    if (trimmed === "/models") { cmdModels(); return; }
-    if (trimmed.startsWith("/model")) { cmdModel(trimmed.slice(6).trim()); return; }
-    if (trimmed === "/auto") { cmdAuto(); return; }
-    if (trimmed === "/memory") { cmdMemory(); return; }
-    if (trimmed === "/skills") { cmdSkills(); return; }
     if (trimmed === "/max:help") { cmdHelp(); return; }
 
-    if (trimmed === "/status") {
-      apiGet("/status", (data: any) => {
-        console.log(JSON.stringify(data, null, 2) + "\n");
-      });
-      return;
-    }
-
-    if (trimmed === "/restart") {
+    if (trimmed === "/max:restart") {
       apiPost("/restart", {}, () => {
         console.log(C.yellow("  ⏳ Max is restarting...\n"));
       });
       return;
     }
 
-    if (trimmed === "/clear") {
+    if (trimmed === "/max:clear") {
       console.clear();
       rl.prompt();
       return;
     }
 
-    if (trimmed === "/copy") {
+    if (trimmed === "/max:copy") {
       if (!lastResponse) {
         console.log(C.dim("  No response to copy.\n"));
         rl.prompt();
