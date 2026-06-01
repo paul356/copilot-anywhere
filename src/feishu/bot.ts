@@ -361,6 +361,19 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         return;
       }
 
+      // ── /max:cancel ────────────────────────────────────────
+      if (text.trim() === "/max:cancel") {
+        const channelKey = `feishu:${senderOpenId}`;
+        clearPending(senderOpenId);
+        messageHandler.cancelChannel(channelKey);
+        await sendChunkedReply(
+          event.message.message_id,
+          event.message.chat_id,
+          "⛔ 已取消当前操作。\n⛔ Current operation cancelled."
+        );
+        return;
+      }
+
       // ── Pending question: route text as an answer ──────────────
       const pending = pendingQuestions.get(senderOpenId);
       if (pending) {
