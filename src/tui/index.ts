@@ -348,6 +348,7 @@ function startThinking(): void {
   stopThinking("restart-thinking");
   thinkingFrame = 0;
   thinkingVisible = true;
+  isThinking = true;
   // Write thinking on its own line, then show a dim prompt indicator on the
   // line below so the user can see the input area without the cursor being bare.
   process.stdout.write(`\n${MAX_LABEL}${C.dim(thinkingFrames[0])}\n`);
@@ -384,6 +385,7 @@ function stopThinking(reason = "unspecified"): void {
     process.stdout.write(`\x1b[1A\r\x1b[J`);
     thinkingVisible = false;
   }
+  isThinking = false;
   debugLog("thinking-stop", {
     requestId: activeRequestId,
     reason,
@@ -395,6 +397,7 @@ function stopThinking(reason = "unspecified"): void {
 // ── State ─────────────────────────────────────────────────
 let connectionId: string | undefined;
 let isStreaming = false;
+let isThinking = false;
 let streamedContent = "";
 let lastResponse = "";
 let activeRequestId = 0;
@@ -466,12 +469,9 @@ function showBanner(): void {
   console.log();
 }
 
-function showStatus(model?: string, skillCount?: number, routerInfo?: { enabled: boolean }): void {
+function showStatus(model?: string, skillCount?: number): void {
   const parts: string[] = [];
   if (model) parts.push(`${C.dim("model:")} ${C.cyan(model)}`);
-  if (routerInfo?.enabled) {
-    parts.push(C.cyan("⚡ auto"));
-  }
   if (skillCount !== undefined) parts.push(`${C.dim("skills:")} ${C.cyan(String(skillCount))}`);
   if (parts.length) console.log(`    ${parts.join("    ")}`);
   console.log();
@@ -482,16 +482,14 @@ function showStatus(model?: string, skillCount?: number, routerInfo?: { enabled:
 function fetchStartupInfo(): void {
   let model = "unknown";
   let skillCount = 0;
-  let routerInfo: { enabled: boolean } | undefined;
   let done = 0;
   const check = () => {
     done++;
-    if (done === 3) showStatus(model, skillCount, routerInfo);
+    if (done === 2) showStatus(model, skillCount);
   };
 
   apiGetSilent("/model", (data: any) => { model = data?.model || "unknown"; check(); });
   apiGetSilent("/skills", (data: any) => { skillCount = Array.isArray(data) ? data.length : 0; check(); });
-  apiGetSilent("/auto", (data: any) => { if (data) routerInfo = { enabled: Boolean(data.enabled) }; check(); });
 }
 
 // ── SSE connection ────────────────────────────────────────
@@ -603,13 +601,6 @@ function connectSSE(): void {
                 isStreaming = false;
                 lastResponse = streamedContent;
                 streamedContent = "";
-                if (event.route && event.route.routerMode === "auto") {
-                  const r = event.route;
-                  const label = r.overrideName
-                    ? `⚡ auto · ${r.model} (${r.overrideName})`
-                    : `⚡ auto · ${r.model}`;
-                  process.stdout.write(`\n${LABEL_PAD}${C.dim(label)}`);
-                }
                 process.stdout.write("\n\n\n");
               } else {
                 // Proactive/background message — render with label
@@ -894,6 +885,11 @@ setTimeout(() => {
 
   rl.on("line", (line) => {
     const trimmed = line.trim();
+    if (isThinking) {
+      // Ignore input while waiting for a response; ESC (cancel) still works
+      // via the separate keypress handler.
+      return;
+    }
     if (!trimmed) {
       debugLog("input-empty-line");
       rl.prompt();

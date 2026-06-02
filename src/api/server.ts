@@ -4,7 +4,6 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { randomBytes } from "crypto";
 import { sendPhoto } from "../telegram/bot.js";
 import { config, persistModel } from "../config.js";
-import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
 import { searchIndex, parseIndex } from "../wiki/index-manager.js";
 import { readPage, ensureWikiStructure } from "../wiki/fs.js";
 import { restartDaemon } from "../daemon.js";
@@ -225,30 +224,6 @@ app.get("/models", async (_req: Request, res: Response) => {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: `Failed to list models: ${msg}` });
   }
-});
-
-// Get auto-routing config
-app.get("/auto", (_req: Request, res: Response) => {
-  const routerConfig = getRouterConfig();
-  res.json({
-    ...routerConfig,
-    currentModel: config.copilotModel,
-    lastRoute: null, // pass-through mode — no route metadata
-  });
-});
-
-// Update auto-routing config
-app.post("/auto", (req: Request, res: Response) => {
-  const body = req.body as Partial<{
-    enabled: boolean;
-    tierModels: Record<string, string>;
-    cooldownMessages: number;
-  }>;
-
-  const updated = updateRouterConfig(body);
-  console.log(`[max] Auto-routing ${updated.enabled ? "enabled" : "disabled"}`);
-
-  res.json(updated);
 });
 
 // List wiki knowledge

@@ -4,7 +4,6 @@ import { chunkMessage, toTelegramMarkdown } from "./formatter.js";
 import { parseIndex } from "../wiki/index-manager.js";
 import { ensureWikiStructure } from "../wiki/fs.js";
 import { restartDaemon } from "../daemon.js";
-import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
 import { route, executeMaxCommand } from "../command-router.js";
 import { getActiveWorkspace } from "../store/db.js";
 import { tmpdir } from "os";
@@ -199,15 +198,6 @@ export function createBot(messageHandler: MessageHandler): Bot {
         console.error("[max] Restart failed:", err);
       });
     }, 500);
-  });
-  bot.command("auto", async (ctx) => {
-    const current = getRouterConfig();
-    const newState = !current.enabled;
-    updateRouterConfig({ enabled: newState });
-    const label = newState
-      ? "⚡ Auto mode on"
-      : `Auto mode off · using ${config.copilotModel}`;
-    await ctx.reply(label);
   });
   bot.command("ws", async (ctx) => {
     const arg = ctx.match?.trim();
