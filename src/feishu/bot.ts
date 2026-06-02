@@ -395,15 +395,20 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         }
       }
 
-      // For slow operations (prompts / CLI commands), send an immediate notice
-      // so the user knows Max is working.
+      // For slow operations (prompts / CLI commands), notify the user.
+      // If the channel is already busy the message is queued — notify immediately.
+      // Otherwise wait 7 s; if Copilot hasn't replied by then, send a notice.
       const channelKey = `feishu:${senderOpenId}`;
       const routedType = route(text, { senderId: senderOpenId, channelKey }).type;
+      let noticeTimer: ReturnType<typeof setTimeout> | undefined;
       if (routedType === "prompt" || routedType === "cli-command") {
-        const notice = messageHandler.isChannelBusy(channelKey)
-          ? "⏳ 前一个请求正在处理中，已加入队列。"
-          : "⏳ 正在思考...";
-        void sendReply(event.message.message_id, event.message.chat_id, notice);
+        if (messageHandler.isChannelBusy(channelKey)) {
+          void sendReply(event.message.message_id, event.message.chat_id, "⏳ 前一个请求正在处理中，已加入队列。");
+        } else {
+          noticeTimer = setTimeout(() => {
+            void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
+          }, 7000);
+        }
       }
 
       // Route and process through unified message handler
@@ -414,6 +419,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         event.message.chat_id,
         messageHandler,
       );
+      clearTimeout(noticeTimer);
 
       if (fullText.length > 0) {
         await sendChunkedReply(event.message.message_id, event.message.chat_id, fullText);
