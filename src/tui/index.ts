@@ -349,10 +349,9 @@ function startThinking(): void {
   thinkingFrame = 0;
   thinkingVisible = true;
   isThinking = true;
-  // Write thinking on its own line, then show a dim prompt indicator on the
-  // line below so the user can see the input area without the cursor being bare.
+  // Write thinking on its own line; cursor sits on the blank line below.
+  // No prompt is shown and input is blocked (isThinking flag) until stopThinking.
   process.stdout.write(`\n${MAX_LABEL}${C.dim(thinkingFrames[0])}\n`);
-  process.stdout.write(`  ${C.dim("› ")}`);
   debugLog("thinking-start", {
     requestId: activeRequestId,
     frame: thinkingFrames[0],
@@ -360,10 +359,9 @@ function startThinking(): void {
   });
   thinkingTimer = setInterval(() => {
     thinkingFrame = (thinkingFrame + 1) % thinkingFrames.length;
-    // Go up to the Thinking line, rewrite it, come back down, redraw dim prompt.
+    // Go up to the Thinking line, rewrite it, come back down.
     process.stdout.write(
-      `\x1b[1A\r\x1b[2K${MAX_LABEL}${C.dim(thinkingFrames[thinkingFrame])}\n` +
-      `\r\x1b[2K  ${C.dim("› ")}`,
+      `\x1b[1A\r\x1b[2K${MAX_LABEL}${C.dim(thinkingFrames[thinkingFrame])}\n`,
     );
     debugLog("thinking-tick", {
       requestId: activeRequestId,
