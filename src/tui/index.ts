@@ -348,9 +348,10 @@ function startThinking(): void {
   stopThinking("restart-thinking");
   thinkingFrame = 0;
   thinkingVisible = true;
-  // Write thinking on its own line, then move cursor to the next line so that
-  // readline keystroke echoes appear below the indicator and don't get erased.
+  // Write thinking on its own line, then show a dim prompt indicator on the
+  // line below so the user can see the input area without the cursor being bare.
   process.stdout.write(`\n${MAX_LABEL}${C.dim(thinkingFrames[0])}\n`);
+  process.stdout.write(`  ${C.dim("› ")}`);
   debugLog("thinking-start", {
     requestId: activeRequestId,
     frame: thinkingFrames[0],
@@ -358,8 +359,11 @@ function startThinking(): void {
   });
   thinkingTimer = setInterval(() => {
     thinkingFrame = (thinkingFrame + 1) % thinkingFrames.length;
-    // Cursor is on the line below thinking; go up, rewrite, come back down.
-    process.stdout.write(`\x1b[1A\r\x1b[2K${MAX_LABEL}${C.dim(thinkingFrames[thinkingFrame])}\n`);
+    // Go up to the Thinking line, rewrite it, come back down, redraw dim prompt.
+    process.stdout.write(
+      `\x1b[1A\r\x1b[2K${MAX_LABEL}${C.dim(thinkingFrames[thinkingFrame])}\n` +
+      `\r\x1b[2K  ${C.dim("› ")}`,
+    );
     debugLog("thinking-tick", {
       requestId: activeRequestId,
       frameIndex: thinkingFrame,
