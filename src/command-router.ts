@@ -13,6 +13,8 @@
 import { createWorkspace, deleteWorkspace, listWorkspaces, getWorkspace, setActiveWorkspace, getActiveWorkspace } from "./store/db.js";
 import { join } from "path";
 import { existsSync } from "fs";
+import { config } from "./config.js";
+import { getRouterConfig } from "./copilot/router.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -136,9 +138,14 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
 
   async status(_args, ctx) {
     const wsList = listWorkspaces();
-    return {
-      reply: `Active workspace: ${ctx.activeWorkspace}\nTotal workspaces: ${wsList.length}`,
-    };
+    const routerCfg = getRouterConfig();
+    const lines: string[] = [
+      `**Model:** ${config.copilotModel}`,
+      `**Auto-router:** ${routerCfg.enabled ? `enabled (fast: ${routerCfg.tierModels.fast} / standard: ${routerCfg.tierModels.standard} / premium: ${routerCfg.tierModels.premium})` : "disabled"}`,
+      `**Active workspace:** ${ctx.activeWorkspace}`,
+      `**Total workspaces:** ${wsList.length}`,
+    ];
+    return { reply: lines.join("\n") };
   },
 };
 

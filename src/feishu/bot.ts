@@ -395,6 +395,13 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         }
       }
 
+      // For slow operations (prompts / CLI commands), send an immediate notice
+      // so the user knows Max is working.
+      const routedType = route(text, { senderId: senderOpenId, channelKey: `feishu:${senderOpenId}` }).type;
+      if (routedType === "prompt" || routedType === "cli-command") {
+        void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
+      }
+
       // Route and process through unified message handler
       const fullText = await processMessage(
         text,
