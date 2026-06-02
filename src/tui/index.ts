@@ -100,16 +100,46 @@ function stripAnsi(str: string): string {
   return str.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+/** Get the visual column width of a single character (CJK/Hangul = 2, others = 1). */
+function getCharVisualWidth(char: string): number {
+  const code = char.codePointAt(0) ?? 0;
+  if (
+    (code >= 0x1100 && code <= 0x115F) ||
+    (code >= 0x2E80 && code <= 0x303E) ||
+    (code >= 0x3040 && code <= 0x33FF) ||
+    (code >= 0x3400 && code <= 0x4DBF) ||
+    (code >= 0x4E00 && code <= 0x9FFF) ||
+    (code >= 0xA000 && code <= 0xA4CF) ||
+    (code >= 0xAC00 && code <= 0xD7AF) ||
+    (code >= 0xF900 && code <= 0xFAFF) ||
+    (code >= 0xFE10 && code <= 0xFE1F) ||
+    (code >= 0xFE30 && code <= 0xFE4F) ||
+    (code >= 0xFF00 && code <= 0xFF60) ||
+    (code >= 0xFFE0 && code <= 0xFFE6)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** Get the total visual column width of a string, accounting for CJK double-width characters. */
+function getVisualWidth(str: string): number {
+  const plain = str.replace(/\x1b\[[0-9;]*m/g, "");
+  let width = 0;
+  for (const char of plain) width += getCharVisualWidth(char);
+  return width;
+}
+
 /** Wrap ANSI-formatted text at word boundaries to fit within maxWidth visible columns. */
 function wrapText(text: string, maxWidth: number): string[] {
-  if (maxWidth <= 0 || stripAnsi(text).length <= maxWidth) return [text];
+  if (maxWidth <= 0 || getVisualWidth(text) <= maxWidth) return [text];
 
   const RESET = "\x1b[0m";
   const lines: string[] = [];
   let remaining = text;
 
   while (remaining.length > 0) {
-    if (stripAnsi(remaining).length <= maxWidth) {
+    if (getVisualWidth(remaining) <= maxWidth) {
       lines.push(remaining);
       break;
     }
@@ -131,7 +161,7 @@ function wrapText(text: string, maxWidth: number): string[] {
           lastSpaceI = i;
           ansiAtSpace = [...ansiStack];
         }
-        visCount++;
+        visCount += getCharVisualWidth(remaining[i]);
         i++;
       }
     }
@@ -280,8 +310,8 @@ function writeStreamChunk(newText: string): void {
     streamLineBuffer += segment;
 
     if (hadPartial) {
-      // Clear the partially-written raw text
-      clearVisualLine(10 + streamLineBuffer.length);
+      // Clear the partially-written raw text (use visual width for CJK double-width chars)
+      clearVisualLine(10 + getVisualWidth(streamLineBuffer));
     }
 
     if (streamLineBuffer.length === 0 && !hadPartial) {
@@ -300,7 +330,7 @@ function writeStreamChunk(newText: string): void {
 /** Flush any remaining partial line and reset streaming state. */
 function flushStreamState(): void {
   if (streamLineBuffer.length > 0) {
-    clearVisualLine(10 + streamLineBuffer.length);
+    clearVisualLine(10 + getVisualWidth(streamLineBuffer));
     writeRenderedStreamLine(streamLineBuffer);
   }
   streamLineBuffer = "";
@@ -318,7 +348,9 @@ function startThinking(): void {
   stopThinking("restart-thinking");
   thinkingFrame = 0;
   thinkingVisible = true;
-  process.stdout.write(`\n${MAX_LABEL}${C.dim(thinkingFrames[0])}`);
+  // Write thinking on its own line, then move cursor to the next line so that
+  // readline keystroke echoes appear below the indicator and don't get erased.
+  process.stdout.write(`\n${MAX_LABEL}${C.dim(thinkingFrames[0])}\n`);
   debugLog("thinking-start", {
     requestId: activeRequestId,
     frame: thinkingFrames[0],
@@ -326,7 +358,8 @@ function startThinking(): void {
   });
   thinkingTimer = setInterval(() => {
     thinkingFrame = (thinkingFrame + 1) % thinkingFrames.length;
-    process.stdout.write(`\r\x1b[K${MAX_LABEL}${C.dim(thinkingFrames[thinkingFrame])}`);
+    // Cursor is on the line below thinking; go up, rewrite, come back down.
+    process.stdout.write(`\x1b[1A\r\x1b[2K${MAX_LABEL}${C.dim(thinkingFrames[thinkingFrame])}\n`);
     debugLog("thinking-tick", {
       requestId: activeRequestId,
       frameIndex: thinkingFrame,
@@ -343,7 +376,8 @@ function stopThinking(reason = "unspecified"): void {
     thinkingTimer = undefined;
   }
   if (thinkingVisible) {
-    process.stdout.write(`\r\x1b[K`);
+    // Cursor is on the line below thinking; go up one line and clear to end of screen.
+    process.stdout.write(`\x1b[1A\r\x1b[J`);
     thinkingVisible = false;
   }
   debugLog("thinking-stop", {
