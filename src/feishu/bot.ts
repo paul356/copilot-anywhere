@@ -412,14 +412,19 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       }
 
       // Route and process through unified message handler
-      const fullText = await processMessage(
-        text,
-        senderOpenId,
-        event.message.message_id,
-        event.message.chat_id,
-        messageHandler,
-      );
-      clearTimeout(noticeTimer);
+      let fullText: string;
+      try {
+        fullText = await processMessage(
+          text,
+          senderOpenId,
+          event.message.message_id,
+          event.message.chat_id,
+          messageHandler,
+        );
+      } finally {
+        // Always cancel the pending notice, even if processMessage throws.
+        clearTimeout(noticeTimer);
+      }
 
       if (fullText.length > 0) {
         await sendChunkedReply(event.message.message_id, event.message.chat_id, fullText);
