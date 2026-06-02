@@ -366,6 +366,11 @@ export class MessageHandler {
     });
   }
 
+  /** Returns true if a channel already has an in-flight or queued message. */
+  isChannelBusy(channelKey: string): boolean {
+    return this.channelProcessing.has(channelKey);
+  }
+
   /** Cancel all in-flight and queued messages for a channel */
   cancelChannel(channelId: string): void {
     this.channelCancels.add(channelId);
