@@ -405,8 +405,12 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         if (messageHandler.isChannelBusy(channelKey)) {
           void sendReply(event.message.message_id, event.message.chat_id, "⏳ 前一个请求正在处理中，已加入队列。");
         } else {
-          noticeTimer = setTimeout(() => {
+          const sendThinking = () => {
             void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
+          };
+          noticeTimer = setTimeout(() => {
+            sendThinking();
+            noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
           }, 7000);
         }
       }
@@ -422,8 +426,9 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
           messageHandler,
         );
       } finally {
-        // Always cancel the pending notice, even if processMessage throws.
+        // Cancel both the initial delay and the repeat interval.
         clearTimeout(noticeTimer);
+        clearInterval(noticeTimer);
       }
 
       if (fullText.length > 0) {
