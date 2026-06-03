@@ -425,6 +425,13 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
           event.message.chat_id,
           messageHandler,
         );
+      } catch (err) {
+        clearTimeout(noticeTimer);
+        clearInterval(noticeTimer);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error("[feishu] processMessage error:", err);
+        void sendReply(event.message.message_id, event.message.chat_id, `❌ 处理消息时发生错误：${errMsg}`);
+        return;
       } finally {
         // Cancel both the initial delay and the repeat interval.
         clearTimeout(noticeTimer);
