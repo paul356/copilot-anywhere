@@ -139,7 +139,7 @@ async function processMessage(
   messageId: string,
   chatId: string,
   messageHandler: MessageHandler,
-  onEarlySend: () => void,
+  onEarlySend: (fromEarlySend: boolean) => void,
 ): Promise<string> {
   const channelKey = `feishu:${openId}`;
   const result = route(text, { senderId: openId, channelKey });
@@ -153,7 +153,7 @@ async function processMessage(
     if (!unsent) return;
     void sendChunkedReply(messageId, chatId, unsent);
     sentLength = latestContent.length;
-    onEarlySend();   // reset the external "正在思考..." timer
+    onEarlySend(true);   // reset the 3-min thinking timer
   };
 
   await messageHandler.handle(result, channelKey, (responseText: string, done: boolean) => {
@@ -445,16 +445,21 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         thinkingSent = true;
         void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
       };
-      const resetThinkingTimer = () => {
-        if (thinkingSent) return; // already told the user we're thinking
+      const resetThinkingTimer = (fromEarlySend: boolean = false) => {
         if (noticeTimer) {
           clearTimeout(noticeTimer);
           clearInterval(noticeTimer);
         }
-        noticeTimer = setTimeout(() => {
-          sendThinking();
+        if (fromEarlySend) {
+          // Early-send replaces the 7s wait; skip directly to 3-min interval
           noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
-        }, 7000);
+        } else {
+          // Initial setup: wait 7s, then show "正在思考", then repeat every 3m
+          noticeTimer = setTimeout(() => {
+            sendThinking();
+            noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+          }, 7000);
+        }
       };
 
       if (routedType === "prompt" || routedType === "cli-command") {
