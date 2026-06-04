@@ -121,22 +121,46 @@ type MessageReceiveEvent = {
   };
 };
 
+/** Early-send configuration. */
+const EARLY_SEND_IDLE_MS = 5000;       // wait 5 s after last delta before early-send
+const SENTENCE_END_RE = /[。.]\s*$/;   // ends with Chinese or English period
+
 /** Route and process a message through the unified message handler.
  *  Handles all routed types: max-command, cli-command, prompt.
  *  When the LLM issues an ask_user question, registers a pending entry and
- *  sends an interactive question card; returns "" in that case. */
+ *  sends an interactive question card; returns "" in that case.
+ *  Implements incremental early-send: when the accumulated text ends with
+ *  a sentence terminator and no new delta arrives for EARLY_SEND_IDLE_MS,
+ *  the unsent portion is sent immediately.  Each early send resets the
+ *  external thinking-notice timer via onEarlySend(). */
 async function processMessage(
   text: string,
   openId: string,
   messageId: string,
   chatId: string,
   messageHandler: MessageHandler,
+  onEarlySend: () => void,
 ): Promise<string> {
   const channelKey = `feishu:${openId}`;
   const result = route(text, { senderId: openId, channelKey });
 
   let latestContent = "";
-  await messageHandler.handle(result, channelKey, (responseText: string, _done: boolean) => {
+  let sentLength = 0;  // characters already delivered to the user
+  let earlySendTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const flushUnsent = () => {
+    const unsent = latestContent.slice(sentLength);
+    if (!unsent) return;
+    void sendChunkedReply(messageId, chatId, unsent);
+    sentLength = latestContent.length;
+    onEarlySend();   // reset the external "正在思考..." timer
+  };
+
+  await messageHandler.handle(result, channelKey, (responseText: string, done: boolean) => {
+    if (done) {
+      if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
+      return; // caller sends the remainder
+    }
     if (!responseText) return;
     const question = tryParseQuestion(responseText);
     if (question) {
@@ -147,8 +171,21 @@ async function processMessage(
     } else {
       // Overwrite each time: streaming sends cumulative text; commands send once with done=true.
       latestContent = responseText;
+      // Restart the idle timer — if the text looks like a complete sentence,
+      // schedule an early send.
+      if (earlySendTimer) clearTimeout(earlySendTimer);
+      if (SENTENCE_END_RE.test(latestContent)) {
+        earlySendTimer = setTimeout(flushUnsent, EARLY_SEND_IDLE_MS);
+      }
     }
   });
+
+  // Flush any remaining unsent text.
+  if (earlySendTimer) clearTimeout(earlySendTimer);
+  const remaining = latestContent.slice(sentLength);
+  if (remaining.length > 0) {
+    await sendChunkedReply(messageId, chatId, remaining);
+  }
 
   console.log(`[feishu] processMessage → ${latestContent.length} chars (type=${result.type}, sender=${openId})`);
   return latestContent;
@@ -398,32 +435,46 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       // For slow operations (prompts / CLI commands), notify the user.
       // If the channel is already busy the message is queued — notify immediately.
       // Otherwise wait 7 s; if Copilot hasn't replied by then, send a notice.
+      // Each early-send from processMessage() resets this timer so the
+      // thinking notice only appears when the AI is truly stalled.
       const channelKey = `feishu:${senderOpenId}`;
       const routedType = route(text, { senderId: senderOpenId, channelKey }).type;
       let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+      let thinkingSent = false;
+      const sendThinking = () => {
+        thinkingSent = true;
+        void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
+      };
+      const resetThinkingTimer = () => {
+        if (thinkingSent) return; // already told the user we're thinking
+        if (noticeTimer) {
+          clearTimeout(noticeTimer);
+          clearInterval(noticeTimer);
+        }
+        noticeTimer = setTimeout(() => {
+          sendThinking();
+          noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+        }, 7000);
+      };
+
       if (routedType === "prompt" || routedType === "cli-command") {
         if (messageHandler.isChannelBusy(channelKey)) {
           void sendReply(event.message.message_id, event.message.chat_id, "⏳ 前一个请求正在处理中，已加入队列。");
         } else {
-          const sendThinking = () => {
-            void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
-          };
-          noticeTimer = setTimeout(() => {
-            sendThinking();
-            noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
-          }, 7000);
+          resetThinkingTimer();
         }
       }
 
-      // Route and process through unified message handler
-      let fullText: string;
+      // Route and process through unified message handler.
+      // processMessage() handles all sending (early + final) internally.
       try {
-        fullText = await processMessage(
+        await processMessage(
           text,
           senderOpenId,
           event.message.message_id,
           event.message.chat_id,
           messageHandler,
+          resetThinkingTimer,
         );
       } catch (err) {
         clearTimeout(noticeTimer);
@@ -436,10 +487,6 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         // Cancel both the initial delay and the repeat interval.
         clearTimeout(noticeTimer);
         clearInterval(noticeTimer);
-      }
-
-      if (fullText.length > 0) {
-        await sendChunkedReply(event.message.message_id, event.message.chat_id, fullText);
       }
     },
 

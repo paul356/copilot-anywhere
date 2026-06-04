@@ -243,36 +243,62 @@ export function createBot(messageHandler: MessageHandler): Bot {
     const channelKey = `telegram:${chatId}`;
     const result = route(prompt, { senderId: channelKey, channelKey });
 
+    let sentLength = 0;
+    let earlySendTimer: ReturnType<typeof setTimeout> | undefined;
+    let isFirstChunk = true;
+
+    const sendChunks = async (text: string) => {
+      const formatted = toTelegramMarkdown(text);
+      const chunks = chunkMessage(formatted);
+      const fallbackChunks = chunkMessage(text);
+      const sendChunk = async (chunk: string, fallback: string, useReply: boolean) => {
+        const opts = useReply
+          ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
+          : { parse_mode: "MarkdownV2" as const };
+        await ctx.reply(chunk, opts).catch(
+          () => ctx.reply(fallback, useReply ? { reply_parameters: replyParams } : {})
+        );
+      };
+      try {
+        for (let i = 0; i < chunks.length; i++) {
+          await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0 && isFirstChunk);
+        }
+      } catch {
+        try {
+          for (let i = 0; i < fallbackChunks.length; i++) {
+            await ctx.reply(fallbackChunks[i], i === 0 && isFirstChunk ? { reply_parameters: replyParams } : {});
+          }
+        } catch {
+          // Nothing more we can do
+        }
+      }
+      isFirstChunk = false;
+    };
+
     messageHandler.handle(result, channelKey, (text: string, done: boolean) => {
       if (done) {
         stopTyping();
+        if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
+        const remaining = text.slice(sentLength);
+        if (remaining.length > 0) {
+          void sendChunks(remaining);
+        }
         void cleanupAttachments(replyAttachments);
-        void (async () => {
-          const formatted = toTelegramMarkdown(text);
-          const chunks = chunkMessage(formatted);
-          const fallbackChunks = chunkMessage(text);
-          const sendChunk = async (chunk: string, fallback: string, isFirst: boolean) => {
-            const opts = isFirst
-              ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
-              : { parse_mode: "MarkdownV2" as const };
-            await ctx.reply(chunk, opts).catch(
-              () => ctx.reply(fallback, isFirst ? { reply_parameters: replyParams } : {})
-            );
-          };
-          try {
-            for (let i = 0; i < chunks.length; i++) {
-              await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0);
-            }
-          } catch {
-            try {
-              for (let i = 0; i < fallbackChunks.length; i++) {
-                await ctx.reply(fallbackChunks[i], i === 0 ? { reply_parameters: replyParams } : {});
-              }
-            } catch {
-              // Nothing more we can do
-            }
+        return;
+      }
+      if (!text) return;
+
+      // Restart the idle timer — if the text looks like a complete sentence,
+      // schedule an early send.
+      if (earlySendTimer) clearTimeout(earlySendTimer);
+      if (/[。.]\s*$/.test(text)) {
+        earlySendTimer = setTimeout(() => {
+          const unsent = text.slice(sentLength);
+          if (unsent) {
+            void sendChunks(unsent);
+            sentLength = text.length;
           }
-        })();
+        }, 5000);
       }
     });
   });
@@ -314,37 +340,61 @@ export function createBot(messageHandler: MessageHandler): Bot {
     const channelKey = `telegram:${chatId}`;
     const result = route(prompt, { senderId: channelKey, channelKey });
 
+    let sentLength = 0;
+    let earlySendTimer: ReturnType<typeof setTimeout> | undefined;
+    let isFirstChunk = true;
+
+    const sendChunks = async (text: string) => {
+      const formatted = toTelegramMarkdown(text);
+      const chunks = chunkMessage(formatted);
+      const fallbackChunks = chunkMessage(text);
+      const sendChunk = async (chunk: string, fallback: string, useReply: boolean) => {
+        const opts = useReply
+          ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
+          : { parse_mode: "MarkdownV2" as const };
+        await ctx.reply(chunk, opts).catch(
+          () => ctx.reply(fallback, useReply ? { reply_parameters: replyParams } : {})
+        );
+      };
+      try {
+        for (let i = 0; i < chunks.length; i++) {
+          await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0 && isFirstChunk);
+        }
+      } catch {
+        try {
+          for (let i = 0; i < fallbackChunks.length; i++) {
+            await ctx.reply(fallbackChunks[i], i === 0 && isFirstChunk ? { reply_parameters: replyParams } : {});
+          }
+        } catch {
+          // Nothing more we can do
+        }
+      }
+      isFirstChunk = false;
+    };
+
     messageHandler.handle(result, channelKey, (text: string, done: boolean) => {
       if (done) {
         stopTyping();
+        if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
+        const remaining = text.slice(sentLength);
+        if (remaining.length > 0) {
+          void sendChunks(remaining);
+        }
         void cleanupAttachments(replyAttachments);
         if (photoPath) void unlink(photoPath).catch(() => {});
-        void (async () => {
-          const formatted = toTelegramMarkdown(text);
-          const chunks = chunkMessage(formatted);
-          const fallbackChunks = chunkMessage(text);
-          const sendChunk = async (chunk: string, fallback: string, isFirst: boolean) => {
-            const opts = isFirst
-              ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
-              : { parse_mode: "MarkdownV2" as const };
-            await ctx.reply(chunk, opts).catch(
-              () => ctx.reply(fallback, isFirst ? { reply_parameters: replyParams } : {})
-            );
-          };
-          try {
-            for (let i = 0; i < chunks.length; i++) {
-              await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0);
-            }
-          } catch {
-            try {
-              for (let i = 0; i < fallbackChunks.length; i++) {
-                await ctx.reply(fallbackChunks[i], i === 0 ? { reply_parameters: replyParams } : {});
-              }
-            } catch {
-              // Nothing more we can do
-            }
+        return;
+      }
+      if (!text) return;
+
+      if (earlySendTimer) clearTimeout(earlySendTimer);
+      if (/[。.]\s*$/.test(text)) {
+        earlySendTimer = setTimeout(() => {
+          const unsent = text.slice(sentLength);
+          if (unsent) {
+            void sendChunks(unsent);
+            sentLength = text.length;
           }
-        })();
+        }, 5000);
       }
     });
   });
