@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { config, persistFeishuAuthorizedOpenId, clearFeishuAuthorizedOpenId } from "../config.js";
 import { route, RoutedMessage, executeMaxCommand, CommandResult } from "../command-router.js";
 import { MessageHandler } from "../message-handler.js";
+import { isMessageProcessed, markMessageProcessed } from "../store/db.js";
 import { buildCardContent, buildTextContent, buildQuestionCard, chunkMessage } from "./formatter.js";
 
 let client: Lark.Client | undefined;
@@ -84,7 +85,7 @@ async function drainHeldMessages(openId: string, messageHandler: MessageHandler)
   console.log(`[feishu] drainHeldMessages: draining ${held.length} held message(s)`);
   for (const { messageId, chatId, text } of held) {
     const channelKey = `feishu:${openId}`;
-    const routed = route(text, { senderId: openId, channelKey });
+    const routed = route(text, { senderId: openId, channelKey, messageId });
     let noticeTimer: ReturnType<typeof setTimeout> | undefined;
     let thinkingSent = false;
     const sendThinking = () => {
@@ -287,21 +288,13 @@ async function processMessage(
 
 // ── Deduplication ─────────────────────────────────────────────────
 
-const RECENT_MESSAGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const recentMessages = new Map<string, number>(); // message_id → timestamp
-
-/** Returns true if this message_id was already processed recently. */
+/** Returns true if this message_id was already processed (persistent, survives restarts). */
 function isDuplicate(messageId: string): boolean {
-  const cutoff = Date.now() - RECENT_MESSAGE_TTL_MS;
-  // Purge expired entries
-  for (const [id, ts] of recentMessages) {
-    if (ts < cutoff) recentMessages.delete(id);
-  }
-  if (recentMessages.has(messageId)) {
-    console.log(`[feishu] Skipping duplicate message ${messageId}`);
+  if (isMessageProcessed(messageId)) {
+    console.log(`[feishu] Skipping duplicate message ${messageId.slice(0, 8)}`);
     return true;
   }
-  recentMessages.set(messageId, Date.now());
+  markMessageProcessed(messageId);
   return false;
 }
 
@@ -481,6 +474,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
       // Skip duplicate messages (Feishu retries events if handler takes >3s)
       if (isDuplicate(event.message.message_id)) return;
+      console.log(`[feishu] Received message msg=${event.message.message_id.slice(0, 8)} type=${event.message.message_type}`);
 
       // ── /max:unpair ────────────────────────────────────────
       if (text.trim() === "/max:unpair") {
@@ -565,7 +559,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       // Each early-send from processMessage() resets this timer so the
       // thinking notice only appears when the AI is truly stalled.
       const channelKey = `feishu:${senderOpenId}`;
-      const routed = route(text, { senderId: senderOpenId, channelKey });
+      const routed = route(text, { senderId: senderOpenId, channelKey, messageId: event.message.message_id });
       let noticeTimer: ReturnType<typeof setTimeout> | undefined;
       let thinkingSent = false;
       const sendThinking = () => {

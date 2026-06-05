@@ -158,7 +158,7 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
   },
 };
 
-export function route(message: string, ctx: { senderId: string; channelKey: string }): RoutedMessage {
+export function route(message: string, ctx: { senderId: string; channelKey: string; messageId?: string }): RoutedMessage {
   const trimmed = message.trim();
 
   if (trimmed.startsWith("/max:")) {
@@ -168,13 +168,14 @@ export function route(message: string, ctx: { senderId: string; channelKey: stri
     const name = spaceIdx === -1 ? rest.toLowerCase() : rest.slice(0, spaceIdx).toLowerCase();
     const argsStr = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).trim();
     const args = argsStr ? argsStr.split(/\s+/) : [];
-    console.log(`[max] Routed max-command: /max:${name} ${argsStr}`.trimEnd() + ` (sender: ${ctx.senderId})`);
+    const mid = ctx.messageId ? ` msg=${ctx.messageId.slice(0, 8)}` : "";
+    console.log(`[max] Routed max-command: /max:${name} ${argsStr}`.trimEnd() + ` (sender: ${ctx.senderId}${mid})`);
     return { type: "max-command", name, args, senderId: ctx.senderId };
   }
 
   if (trimmed.startsWith("/")) {
-    // ─── Copilot CLI slash command → PTY ───
-    console.log(`[max] Routed cli-command: ${trimmed.slice(0, 80)} (sender: ${ctx.senderId})`);
+    const mid = ctx.messageId ? ` msg=${ctx.messageId.slice(0, 8)}` : "";
+    console.log(`[max] Routed cli-command: ${trimmed.slice(0, 80)} (sender: ${ctx.senderId}${mid})`);
     return { type: "cli-command", command: trimmed, senderId: ctx.senderId };
   }
 

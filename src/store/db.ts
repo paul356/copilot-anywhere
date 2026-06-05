@@ -106,6 +106,16 @@ export function getDb(): Database.Database {
     // Prune conversation log at startup — keep more history for better recovery
     db.prepare(`DELETE FROM conversation_log WHERE id NOT IN (SELECT id FROM conversation_log ORDER BY id DESC LIMIT 1000)`).run();
 
+    // Persistent message dedup — survives restarts so Feishu replay doesn't loop
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS processed_messages (
+        message_id TEXT PRIMARY KEY,
+        processed_at INTEGER NOT NULL
+      )
+    `);
+    // Prune entries older than 1 hour on startup
+    db.prepare(`DELETE FROM processed_messages WHERE processed_at < ?`).run(Date.now() - 3600_000);
+
     // Set up FTS5 for memory search (graceful fallback if not available)
     try {
       db.exec(`
@@ -198,6 +208,29 @@ export function getRecentConversation(limit = 20): string {
 
 // ---------------------------------------------------------------------------
 // SQLite memory functions removed — wiki is the single source of truth.
+
+// ── Persistent message deduplication ──────────────────────────────
+
+const MESSAGE_TTL_MS = 24 * 3600_000; // 24 hours
+let pruneCounter = 0;
+
+/** Returns true if this message_id was already processed. */
+export function isMessageProcessed(messageId: string): boolean {
+  const db = getDb();
+  const row = db.prepare(`SELECT 1 FROM processed_messages WHERE message_id = ?`).get(messageId);
+  return row !== undefined;
+}
+
+/** Mark a message_id as processed. Ignores duplicates. */
+export function markMessageProcessed(messageId: string): void {
+  const db = getDb();
+  db.prepare(`INSERT OR IGNORE INTO processed_messages (message_id, processed_at) VALUES (?, ?)`).run(messageId, Date.now());
+  // Periodic prune — every 50th insert, clean up expired entries
+  pruneCounter++;
+  if (pruneCounter % 50 === 0) {
+    db.prepare(`DELETE FROM processed_messages WHERE processed_at < ?`).run(Date.now() - MESSAGE_TTL_MS);
+  }
+}
 // The memories table and FTS5 index are preserved in the schema for safety
 // (existing data is not deleted), but no code reads or writes to them.
 // ---------------------------------------------------------------------------
