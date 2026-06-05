@@ -10,7 +10,7 @@
  * and never forwarded to the CLI.
  */
 
-import { createWorkspace, deleteWorkspace, listWorkspaces, getWorkspace, setActiveWorkspace, getActiveWorkspace } from "./store/db.js";
+import { createWorkspace, deleteWorkspace, listWorkspaces, getWorkspace, setActiveWorkspace, getActiveWorkspace, syncDb } from "./store/db.js";
 import { join } from "path";
 import { existsSync } from "fs";
 import { spawn } from "child_process";
@@ -118,6 +118,7 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
     // Delay the actual restart so the reply can be sent to the user first
     setTimeout(() => {
       console.log("[max] Restarting daemon...");
+      syncDb();
       const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
         detached: true,
         stdio: "inherit",

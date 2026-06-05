@@ -299,8 +299,15 @@ export function setActiveWorkspace(channelKey: string, name: string): void {
   setState(`active_ws:${normalizeChannelKey(channelKey)}`, name);
 }
 
+/** Force-flush all pending DB writes to disk. Call before process.exit(). */
+export function syncDb(): void {
+  if (!db) return;
+  try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch { /* best-effort */ }
+}
+
 export function closeDb(): void {
   if (db) {
+    try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch { /* best-effort */ }
     db.close();
     db = undefined;
   }
