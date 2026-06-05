@@ -81,6 +81,7 @@ function clearPending(openId: string): PendingQuestion | undefined {
 async function drainHeldMessages(openId: string, messageHandler: MessageHandler): Promise<void> {
   const held = takeHeldMessages(openId);
   if (held.length === 0) return;
+  console.log(`[feishu] drainHeldMessages: draining ${held.length} held message(s)`);
   for (const { messageId, chatId, text } of held) {
     const channelKey = `feishu:${openId}`;
     const routedType = route(text, { senderId: openId, channelKey }).type;
@@ -133,7 +134,7 @@ function tryParseQuestion(text: string): { question: string; choices: string[]; 
       return {
         question: obj.question,
         choices: Array.isArray(obj.choices) ? obj.choices : [],
-        allowFreeform: obj.allow_freeform !== false,
+        allowFreeform: obj.allowFreeform !== false,
       };
     }
   } catch {
@@ -251,6 +252,7 @@ async function processMessage(
         allowFreeform: question.allowFreeform,
         cardSent: false,
       });
+      console.log(`[feishu] new pending ask_user: allowFreeform=${question.allowFreeform} choices=[${question.choices.join(",")}] qid=${questionId.slice(0,8)}`);
       sendQuestionCard(messageId, chatId, question.question, question.choices, question.allowFreeform, questionId)
         .then(cardMessageId => {
           const pending = pendingQuestions.get(openId);
