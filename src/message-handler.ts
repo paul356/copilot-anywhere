@@ -520,8 +520,14 @@ export class MessageHandler {
           this.activeCallbacks.set(channelId, callback);
 
           // Debug: log all session events related to tools/permissions/errors
+          // Track session.error events so we can report them to the user
+          let sessionError: string | null = null;
           const unsubDebug = session.on((event: any) => {
             const t = event?.type ?? "";
+            if (t === "session.error") {
+              const msg = event?.data?.message ?? event?.message ?? "Unknown session error";
+              sessionError = msg;
+            }
             if (t.includes("tool") || t.includes("permission") || t.includes("error") || t.includes("session.error")) {
               console.log(`[message-handler] Event ${t}: ${JSON.stringify(event).slice(0, 500)}`);
             }
@@ -543,6 +549,11 @@ export class MessageHandler {
               unsubDebug();
               this.sessionChannels.delete(session.sessionId);
               this.activeCallbacks.delete(channelId);
+              if (sessionError) {
+                console.error(`[message-handler] Prompt error: ${sessionError}`);
+                reject(new Error(sessionError));
+                return;
+              }
               console.log(`[message-handler] Prompt response (${Date.now() - t0}ms, ${fullText.length} chars): ${fullText.slice(0, 300)}`);
               callback("", true);
               resolve(fullText);

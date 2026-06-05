@@ -236,6 +236,7 @@ async function processMessage(
   await messageHandler.handle(result, channelKey, (responseText: string, done: boolean) => {
     if (done) {
       if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
+      if (responseText) latestContent = responseText; // capture max-command / cli-command one-shot result
       return; // caller sends the remainder
     }
     if (!responseText) return;
