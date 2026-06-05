@@ -84,7 +84,7 @@ async function drainHeldMessages(openId: string, messageHandler: MessageHandler)
   console.log(`[feishu] drainHeldMessages: draining ${held.length} held message(s)`);
   for (const { messageId, chatId, text } of held) {
     const channelKey = `feishu:${openId}`;
-    const routedType = route(text, { senderId: openId, channelKey }).type;
+    const routed = route(text, { senderId: openId, channelKey });
     let noticeTimer: ReturnType<typeof setTimeout> | undefined;
     let thinkingSent = false;
     const sendThinking = () => {
@@ -105,7 +105,7 @@ async function drainHeldMessages(openId: string, messageHandler: MessageHandler)
         }, 7000);
       }
     };
-    if (routedType === "prompt" || routedType === "cli-command") {
+    if (routed.type === "prompt" || routed.type === "cli-command") {
       if (messageHandler.isChannelBusy(channelKey)) {
         void sendReply(messageId, chatId, "⏳ 前一个请求正在处理中，已加入队列。");
       } else {
@@ -113,7 +113,7 @@ async function drainHeldMessages(openId: string, messageHandler: MessageHandler)
       }
     }
     try {
-      await processMessage(text, openId, messageId, chatId, messageHandler, resetThinkingTimer);
+      await processMessage(routed, openId, messageId, chatId, messageHandler, resetThinkingTimer);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error("[feishu] drainHeldMessages error:", err);
@@ -211,7 +211,7 @@ const SENTENCE_END_RE = /[。.]\s*$/;   // ends with Chinese or English period
  *  the unsent portion is sent immediately.  Each early send resets the
  *  external thinking-notice timer via onEarlySend(). */
 async function processMessage(
-  text: string,
+  routed: RoutedMessage,
   openId: string,
   messageId: string,
   chatId: string,
@@ -219,7 +219,6 @@ async function processMessage(
   onEarlySend: (fromEarlySend: boolean) => void,
 ): Promise<string> {
   const channelKey = `feishu:${openId}`;
-  const result = route(text, { senderId: openId, channelKey });
 
   let latestContent = "";
   let sentLength = 0;  // characters already delivered to the user
@@ -233,7 +232,7 @@ async function processMessage(
     onEarlySend(true);   // reset the 3-min thinking timer
   };
 
-  await messageHandler.handle(result, channelKey, (responseText: string, done: boolean) => {
+  await messageHandler.handle(routed, channelKey, (responseText: string, done: boolean) => {
     if (done) {
       if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
       if (responseText) latestContent = responseText; // capture max-command / cli-command one-shot result
@@ -282,7 +281,7 @@ async function processMessage(
     await sendChunkedReply(messageId, chatId, remaining);
   }
 
-  console.log(`[feishu] processMessage → ${latestContent.length} chars (type=${result.type}, sender=${openId})`);
+  console.log(`[feishu] processMessage → ${latestContent.length} chars (type=${routed.type}, sender=${openId})`);
   return latestContent;
 }
 
@@ -566,7 +565,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       // Each early-send from processMessage() resets this timer so the
       // thinking notice only appears when the AI is truly stalled.
       const channelKey = `feishu:${senderOpenId}`;
-      const routedType = route(text, { senderId: senderOpenId, channelKey }).type;
+      const routed = route(text, { senderId: senderOpenId, channelKey });
       let noticeTimer: ReturnType<typeof setTimeout> | undefined;
       let thinkingSent = false;
       const sendThinking = () => {
@@ -590,7 +589,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         }
       };
 
-      if (routedType === "prompt" || routedType === "cli-command") {
+      if (routed.type === "prompt" || routed.type === "cli-command") {
         if (messageHandler.isChannelBusy(channelKey)) {
           void sendReply(event.message.message_id, event.message.chat_id, "⏳ 前一个请求正在处理中，已加入队列。");
         } else {
@@ -602,7 +601,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       // processMessage() handles all sending (early + final) internally.
       try {
         await processMessage(
-          text,
+          routed,
           senderOpenId,
           event.message.message_id,
           event.message.chat_id,
