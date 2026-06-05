@@ -2,7 +2,7 @@
  * Command Router
  *
  * Routes incoming messages into three categories:
- *   1. /max:<cmd>    → Max's own workspace/model management commands
+ *   1. /max:<cmd>    → Max's own workspace management commands
  *   2. /<slash-cmd>  → Copilot CLI slash commands (forwarded to PTY)
  *   3. plain text    → Copilot SDK session prompt
  *
@@ -13,7 +13,7 @@
 import { createWorkspace, deleteWorkspace, listWorkspaces, getWorkspace, setActiveWorkspace, getActiveWorkspace } from "./store/db.js";
 import { join } from "path";
 import { existsSync } from "fs";
-import { config } from "./config.js";
+import { spawn } from "child_process";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -114,11 +114,19 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
     }
   },
 
-  async model(args, _ctx) {
-    const name = args[0];
-    if (!name) return { reply: "用法: /max:model <model-name>" };
-    // We'll wire this to config.copilotModel in the daemon; for now just reply
-    return { reply: `模型已设置为: ${name} (重新连接后生效)` };
+  async restart(_args, _ctx) {
+    // Delay the actual restart so the reply can be sent to the user first
+    setTimeout(() => {
+      console.log("[max] Restarting daemon...");
+      const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+        detached: true,
+        stdio: "inherit",
+        env: { ...process.env, MAX_RESTARTED: "1" },
+      });
+      child.unref();
+      process.exit(0);
+    }, 200);
+    return { reply: "🔄 Restarting Max..." };
   },
 
   async help(_args, _ctx) {
@@ -129,8 +137,13 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
         "  /max:ws switch <name>        Switch workspace",
         "  /max:ws delete <name>        Delete workspace",
         "  /max:ws list                 List all workspaces",
-        "  /max:model <name>            Switch model",
+        "  /max:restart                 Restart the daemon",
+        "  /max:skip                    Skip the current question",
+        "  /max:cancel                  Cancel the current operation",
+        "  /max:status                  Show daemon status",
         "  /max:help                    Show this help",
+        "",
+        "Use /help for Copilot CLI commands.",
       ].join("\n"),
     };
   },
@@ -138,15 +151,12 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
   async status(_args, ctx) {
     const wsList = listWorkspaces();
     const lines: string[] = [
-      `**Model:** ${config.copilotModel}`,
       `**Active workspace:** ${ctx.activeWorkspace}`,
       `**Total workspaces:** ${wsList.length}`,
     ];
     return { reply: lines.join("\n") };
   },
 };
-
-// ── Router ──────────────────────────────────────────────────────────
 
 export function route(message: string, ctx: { senderId: string; channelKey: string }): RoutedMessage {
   const trimmed = message.trim();
