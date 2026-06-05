@@ -429,16 +429,10 @@ export class MessageHandler {
       false,
     );
 
-    // Wait for the answer
+    // Wait for the answer indefinitely until the user responds or the
+    // channel cancels the pending ask_user request.
     return new Promise<string>((resolve) => {
       this.pendingInput.set(channelKey, { resolve });
-      // Timeout after 5 minutes to avoid hanging forever
-      setTimeout(() => {
-        if (this.pendingInput.has(channelKey)) {
-          this.pendingInput.delete(channelKey);
-          resolve("(The user did not respond in time.)");
-        }
-      }, 5 * 60 * 1000);
     });
   }
 

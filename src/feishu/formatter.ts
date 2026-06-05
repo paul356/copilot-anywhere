@@ -59,7 +59,7 @@ export function buildTextContent(text: string): string {
  * Build an interactive question card for ask_user prompts.
  * Numbered buttons for each choice; footer explains freeform/skip options.
  */
-export function buildQuestionCard(question: string, choices: string[], allowFreeform: boolean): string {
+export function buildQuestionCard(question: string, choices: string[], allowFreeform: boolean, questionId: string): string {
   const elements: object[] = [
     { tag: "markdown", content: `**💬 ${question}**` },
   ];
@@ -71,7 +71,7 @@ export function buildQuestionCard(question: string, choices: string[], allowFree
         tag: "button",
         text: { tag: "plain_text", content: `${i + 1}. ${c}` },
         type: "primary",
-        value: { choice: c },
+        value: { choice: c, questionId },
       })),
     });
   }
