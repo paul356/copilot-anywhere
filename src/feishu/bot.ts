@@ -291,7 +291,7 @@ async function processMessage(
 /** Returns true if this message_id was already processed (persistent, survives restarts). */
 function isDuplicate(messageId: string): boolean {
   if (isMessageProcessed(messageId)) {
-    console.log(`[feishu] Skipping duplicate message ${messageId.slice(0, 8)}`);
+    console.log(`[feishu] ${new Date().toISOString()} Skipping duplicate message_id=${messageId}`);
     return true;
   }
   markMessageProcessed(messageId);
@@ -474,7 +474,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
       // Skip duplicate messages (Feishu retries events if handler takes >3s)
       if (isDuplicate(event.message.message_id)) return;
-      console.log(`[feishu] Received message msg=${event.message.message_id.slice(0, 8)} type=${event.message.message_type}`);
+      console.log(`[feishu] ${new Date().toISOString()} Received message_id=${event.message.message_id} type=${event.message.message_type} text="${text.slice(0, 80)}"`);
 
       // ── /max:unpair ────────────────────────────────────────
       if (text.trim() === "/max:unpair") {

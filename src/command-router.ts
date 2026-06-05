@@ -10,10 +10,9 @@
  * and never forwarded to the CLI.
  */
 
-import { createWorkspace, deleteWorkspace, listWorkspaces, getWorkspace, setActiveWorkspace, getActiveWorkspace, syncDb } from "./store/db.js";
+import { createWorkspace, deleteWorkspace, listWorkspaces, getWorkspace, setActiveWorkspace, getActiveWorkspace } from "./store/db.js";
 import { join } from "path";
 import { existsSync } from "fs";
-import { spawn } from "child_process";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -115,17 +114,18 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
   },
 
   async restart(_args, _ctx) {
-    // Delay the actual restart so the reply can be sent to the user first
+    // Delay the actual restart so the reply can be sent to the user first.
+    // Use the daemon's restartDaemon() (via dynamic import to avoid circular
+    // dependency) so the CLI PTY subprocess is properly stopped before exit.
+    // Without this, the old copilot --ui-server process lingers and is left
+    // behind when the user later Ctrl+C's the new daemon.
     setTimeout(() => {
-      console.log("[max] Restarting daemon...");
-      syncDb();
-      const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
-        detached: true,
-        stdio: "inherit",
-        env: { ...process.env, MAX_RESTARTED: "1" },
-      });
-      child.unref();
-      process.exit(0);
+      import("./daemon.js").then(({ restartDaemon }) =>
+        restartDaemon().catch((err: unknown) => {
+          console.error("[max] Restart failed:", err);
+          process.exit(1);
+        }),
+      );
     }, 200);
     return { reply: "🔄 Restarting Max..." };
   },

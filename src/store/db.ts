@@ -1,6 +1,9 @@
 import Database from "better-sqlite3";
 import { DB_PATH, ensureMaxHome } from "../paths.js";
 
+const MESSAGE_TTL_MS = 24 * 3600_000; // 24 hours — shared by startup prune & periodic prune
+const ts = () => new Date().toISOString();
+
 let db: Database.Database | undefined;
 let logInsertCount = 0;
 let fts5Available = false;
@@ -113,8 +116,12 @@ export function getDb(): Database.Database {
         processed_at INTEGER NOT NULL
       )
     `);
-    // Prune entries older than 1 hour on startup
-    db.prepare(`DELETE FROM processed_messages WHERE processed_at < ?`).run(Date.now() - 3600_000);
+    // Prune entries older than 24 hours on startup
+    const cutoff = Date.now() - MESSAGE_TTL_MS;
+    const pruneResult = db.prepare(`DELETE FROM processed_messages WHERE processed_at < ?`).run(cutoff);
+    if (pruneResult.changes > 0) {
+      console.log(`[db] ${ts()} Pruned ${pruneResult.changes} expired message(s) on startup`);
+    }
 
     // Set up FTS5 for memory search (graceful fallback if not available)
     try {
@@ -211,20 +218,26 @@ export function getRecentConversation(limit = 20): string {
 
 // ── Persistent message deduplication ──────────────────────────────
 
-const MESSAGE_TTL_MS = 24 * 3600_000; // 24 hours
 let pruneCounter = 0;
 
 /** Returns true if this message_id was already processed. */
 export function isMessageProcessed(messageId: string): boolean {
   const db = getDb();
-  const row = db.prepare(`SELECT 1 FROM processed_messages WHERE message_id = ?`).get(messageId);
-  return row !== undefined;
+  const row = db.prepare(`SELECT processed_at FROM processed_messages WHERE message_id = ?`).get(messageId) as { processed_at: number } | undefined;
+  if (row) {
+    const ageMs = Date.now() - row.processed_at;
+    console.log(`[db] ${ts()} Duplicate message_id=${messageId} (age=${(ageMs / 1000).toFixed(0)}s)`);
+    return true;
+  }
+  return false;
 }
 
 /** Mark a message_id as processed. Ignores duplicates. */
 export function markMessageProcessed(messageId: string): void {
   const db = getDb();
-  db.prepare(`INSERT OR IGNORE INTO processed_messages (message_id, processed_at) VALUES (?, ?)`).run(messageId, Date.now());
+  const now = Date.now();
+  db.prepare(`INSERT OR IGNORE INTO processed_messages (message_id, processed_at) VALUES (?, ?)`).run(messageId, now);
+  console.log(`[db] ${ts()} Marked message_id=${messageId}`);
   // Periodic prune — every 50th insert, clean up expired entries
   pruneCounter++;
   if (pruneCounter % 50 === 0) {

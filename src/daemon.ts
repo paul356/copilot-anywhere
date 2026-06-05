@@ -7,9 +7,9 @@ import {
   stopBot as stopFeishuBot,
   sendProactiveMessage as sendFeishuProactiveMessage,
 } from "./feishu/bot.js";
-import { getDb, closeDb } from "./store/db.js";
+import { getDb, closeDb, syncDb } from "./store/db.js";
 import { config } from "./config.js";
-import { spawn, execSync } from "child_process";
+import { spawn, execSync, type ChildProcess } from "child_process";
 import { readdirSync, statSync, rmSync } from "fs";
 import { join } from "path";
 import { checkForUpdate } from "./update.js";
@@ -25,6 +25,7 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 let cliProcess: CLIProcess | undefined;
 let messageHandler: MessageHandler | undefined;
+let proxyChild: ChildProcess | null = null;  // child we're forwarding signals to (restart proxy)
 
 /** Kill any process already listening on our copilot port (stale from a crashed/restarted daemon). */
 async function killStaleCopilotOnPort(port: number): Promise<void> {
@@ -272,18 +273,36 @@ export async function restartDaemon(): Promise<void> {
 
   try { await cliProcess?.stop(); } catch { /* best effort */ }
   try { await stopClient(); } catch { /* best effort */ }
+  syncDb();
   closeDb();
 
-  // Spawn a detached replacement process with the same args (include execArgv for tsx/loaders)
+  // Kill the old proxy chain if we ourselves are acting as a signal proxy.
+  // This prevents unbounded chain growth across multiple restarts.
+  proxyChild?.kill("SIGTERM");
+  proxyChild = null;
+
+  // Spawn a replacement process. We stay alive as a signal proxy so the child
+  // remains in the foreground process group and receives Ctrl+C (SIGINT).
   const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
-    detached: true,
     stdio: "inherit",
     env: { ...process.env, MAX_RESTARTED: "1" },
   });
-  child.unref();
+  proxyChild = child;
 
-  console.log("[max] New process spawned. Exiting old process.");
-  process.exit(0);
+  // Replace signal handlers: forward to child instead of shutting down ourselves
+  const forward = (sig: NodeJS.Signals) => child.kill(sig);
+  process.removeAllListeners("SIGINT");
+  process.removeAllListeners("SIGTERM");
+  process.on("SIGINT", () => forward("SIGINT"));
+  process.on("SIGTERM", () => forward("SIGTERM"));
+
+  // When the child exits, we exit too — the shell regains the prompt.
+  child.on("exit", (code) => {
+    proxyChild = null;
+    process.exit(code ?? 0);
+  });
+
+  console.log("[max] New process spawned — forwarding signals until it exits.");
 }
 
 process.on("SIGINT", shutdown);
