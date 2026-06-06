@@ -89,7 +89,13 @@ async function drainHeldMessages(openId: string, messageHandler: MessageHandler)
     let noticeTimer: ReturnType<typeof setTimeout> | undefined;
     let thinkingSent = false;
     const sendThinking = () => {
+      if (pendingQuestions.has(openId)) {
+        console.log(`[feishu:drainHeld] sendThinking skipped (pending question) | pendingQ=true`);
+        if (noticeTimer) { clearInterval(noticeTimer); noticeTimer = undefined; }
+        return;
+      }
       thinkingSent = true;
+      console.log(`[feishu:drainHeld] sendThinking fired | noticeTimer=${!!noticeTimer} thinkingSent=${thinkingSent} pendingQ=false`);
       void sendReply(messageId, chatId, "⏳ 正在思考...");
     };
     const resetThinkingTimer = (fromEarlySend: boolean = false) => {
@@ -102,7 +108,9 @@ async function drainHeldMessages(openId: string, messageHandler: MessageHandler)
       } else {
         noticeTimer = setTimeout(() => {
           sendThinking();
-          noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+          if (!pendingQuestions.has(openId)) {
+            noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+          }
         }, 7000);
       }
     };
@@ -563,7 +571,13 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       let noticeTimer: ReturnType<typeof setTimeout> | undefined;
       let thinkingSent = false;
       const sendThinking = () => {
+        if (pendingQuestions.has(senderOpenId)) {
+          console.log(`[feishu:main] sendThinking skipped (pending question) | pendingQ=true`);
+          if (noticeTimer) { clearInterval(noticeTimer); noticeTimer = undefined; }
+          return;
+        }
         thinkingSent = true;
+        console.log(`[feishu:main] sendThinking fired | noticeTimer=${!!noticeTimer} thinkingSent=${thinkingSent} busy=${messageHandler.isChannelBusy(channelKey)} pendingQ=false`);
         void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
       };
       const resetThinkingTimer = (fromEarlySend: boolean = false) => {
@@ -578,7 +592,9 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
           // Initial setup: wait 7s, then show "正在思考", then repeat every 3m
           noticeTimer = setTimeout(() => {
             sendThinking();
-            noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+            if (!pendingQuestions.has(senderOpenId)) {
+              noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+            }
           }, 7000);
         }
       };
@@ -643,6 +659,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         return;
       }
       clearPending(openId);
+      void sendReply(evt.messageId, evt.chatId, `✅ 已选择：${payload.choice}`);
       messageHandler.answerUserInput(`feishu:${openId}`, payload.choice);
       await drainHeldMessages(openId, messageHandler);
     },
