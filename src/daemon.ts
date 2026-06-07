@@ -276,6 +276,10 @@ export async function restartDaemon(): Promise<void> {
   syncDb();
   closeDb();
 
+  // Allow WS connections to fully close before spawning the new daemon.
+  // Otherwise Feishu may route events to the old (defunct) connection.
+  await new Promise<void>(resolve => setTimeout(resolve, 2000));
+
   // Kill the old proxy chain if we ourselves are acting as a signal proxy.
   // This prevents unbounded chain growth across multiple restarts.
   proxyChild?.kill("SIGTERM");
