@@ -79,6 +79,45 @@ function clearPending(openId: string): PendingQuestion | undefined {
   return pending;
 }
 
+/** openId → thinking notice timer (shared across messages for the same sender) */
+const thinkingTimers = new Map<string, ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>();
+function clearThinkingTimer(openId: string): void {
+  const existing = thinkingTimers.get(openId);
+  if (existing) {
+    clearTimeout(existing);
+    clearInterval(existing);
+    thinkingTimers.delete(openId);
+  }
+}
+function setThinkingTimer(openId: string, timer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>): void {
+  clearThinkingTimer(openId);
+  thinkingTimers.set(openId, timer);
+}
+
+/** openId+text → last processed timestamp for content-based dedup.
+ *  Prevents the same sender from triggering the same action twice
+ *  (e.g. Feishu retrying /max:restart with a new message_id). */
+const recentCommands = new Map<string, number>();
+const CONTENT_DEDUP_TTL_MS = 60_000; // 60 seconds
+
+function isRecentDuplicate(openId: string, text: string): boolean {
+  const key = `${openId}::${text.trim()}`;
+  const last = recentCommands.get(key);
+  if (last && Date.now() - last < CONTENT_DEDUP_TTL_MS) {
+    console.log(`[feishu] Skipping recent duplicate: openId=${openId} text="${text.trim().slice(0, 40)}"`);
+    return true;
+  }
+  recentCommands.set(key, Date.now());
+  // Prune stale entries periodically
+  if (recentCommands.size > 100) {
+    const cutoff = Date.now() - CONTENT_DEDUP_TTL_MS;
+    for (const [k, ts] of recentCommands) {
+      if (ts < cutoff) recentCommands.delete(k);
+    }
+  }
+  return false;
+}
+
 async function drainHeldMessages(openId: string, messageHandler: MessageHandler): Promise<void> {
   const held = takeHeldMessages(openId);
   if (held.length === 0) return;
@@ -86,32 +125,35 @@ async function drainHeldMessages(openId: string, messageHandler: MessageHandler)
   for (const { messageId, chatId, text } of held) {
     const channelKey = `feishu:${openId}`;
     const routed = route(text, { senderId: openId, channelKey, messageId });
-    let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+    clearThinkingTimer(openId);
     let thinkingSent = false;
     const sendThinking = () => {
       if (pendingQuestions.has(openId)) {
         console.log(`[feishu:drainHeld] sendThinking skipped (pending question) | pendingQ=true`);
-        if (noticeTimer) { clearInterval(noticeTimer); noticeTimer = undefined; }
+        clearThinkingTimer(openId);
+        return;
+      }
+      if (!messageHandler.isChannelBusy(channelKey)) {
+        console.log(`[feishu:drainHeld] sendThinking skipped (channel no longer busy) | busy=false`);
+        clearThinkingTimer(openId);
         return;
       }
       thinkingSent = true;
-      console.log(`[feishu:drainHeld] sendThinking fired | noticeTimer=${!!noticeTimer} thinkingSent=${thinkingSent} pendingQ=false`);
+      console.log(`[feishu:drainHeld] sendThinking fired | thinkingSent=${thinkingSent} busy=true pendingQ=false`);
       void sendReply(messageId, chatId, "⏳ 正在思考...");
     };
     const resetThinkingTimer = (fromEarlySend: boolean = false) => {
-      if (noticeTimer) {
-        clearTimeout(noticeTimer);
-        clearInterval(noticeTimer);
-      }
+      clearThinkingTimer(openId);
       if (fromEarlySend) {
-        noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+        setThinkingTimer(openId, setInterval(sendThinking, 3 * 60 * 1000));
       } else {
-        noticeTimer = setTimeout(() => {
+        const initial = setTimeout(() => {
           sendThinking();
           if (!pendingQuestions.has(openId)) {
-            noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+            setThinkingTimer(openId, setInterval(sendThinking, 3 * 60 * 1000));
           }
         }, 7000);
+        setThinkingTimer(openId, initial);
       }
     };
     if (routed.type === "prompt" || routed.type === "cli-command") {
@@ -128,8 +170,7 @@ async function drainHeldMessages(openId: string, messageHandler: MessageHandler)
       console.error("[feishu] drainHeldMessages error:", err);
       void sendReply(messageId, chatId, `❌ 处理挂起消息时发生错误：${errMsg}`);
     } finally {
-      clearTimeout(noticeTimer);
-      clearInterval(noticeTimer);
+      clearThinkingTimer(openId);
     }
   }
 }
@@ -420,6 +461,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
   const dispatcher = new Lark.EventDispatcher({}).register({
     "im.message.receive_v1": async (data: unknown) => {
+      try {
       const event = data as MessageReceiveEvent;
       const senderOpenId = event.sender?.sender_id?.open_id;
 
@@ -482,6 +524,8 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
       // Skip duplicate messages (Feishu retries events if handler takes >3s)
       if (isDuplicate(event.message.message_id)) return;
+      // Also skip recent duplicates by content (same sender, same text within 60s)
+      if (isRecentDuplicate(senderOpenId, text)) return;
       console.log(`[feishu] ${new Date().toISOString()} Received message_id=${event.message.message_id} type=${event.message.message_type} text="${text.slice(0, 80)}"`);
 
       // ── /max:unpair ────────────────────────────────────────
@@ -500,6 +544,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       if (text.trim() === "/max:cancel") {
         const channelKey = `feishu:${senderOpenId}`;
         clearPending(senderOpenId);
+        clearThinkingTimer(senderOpenId);
         heldMessages.delete(senderOpenId);
         messageHandler.cancelChannel(channelKey);
         await sendChunkedReply(
@@ -568,34 +613,38 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       // thinking notice only appears when the AI is truly stalled.
       const channelKey = `feishu:${senderOpenId}`;
       const routed = route(text, { senderId: senderOpenId, channelKey, messageId: event.message.message_id });
-      let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+      // Clear any leftover thinking timer from a previous message for this sender
+      clearThinkingTimer(senderOpenId);
       let thinkingSent = false;
       const sendThinking = () => {
         if (pendingQuestions.has(senderOpenId)) {
           console.log(`[feishu:main] sendThinking skipped (pending question) | pendingQ=true`);
-          if (noticeTimer) { clearInterval(noticeTimer); noticeTimer = undefined; }
+          clearThinkingTimer(senderOpenId);
+          return;
+        }
+        if (!messageHandler.isChannelBusy(channelKey)) {
+          console.log(`[feishu:main] sendThinking skipped (channel no longer busy) | busy=false`);
+          clearThinkingTimer(senderOpenId);
           return;
         }
         thinkingSent = true;
-        console.log(`[feishu:main] sendThinking fired | noticeTimer=${!!noticeTimer} thinkingSent=${thinkingSent} busy=${messageHandler.isChannelBusy(channelKey)} pendingQ=false`);
+        console.log(`[feishu:main] sendThinking fired | thinkingSent=${thinkingSent} busy=true pendingQ=false`);
         void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
       };
       const resetThinkingTimer = (fromEarlySend: boolean = false) => {
-        if (noticeTimer) {
-          clearTimeout(noticeTimer);
-          clearInterval(noticeTimer);
-        }
+        clearThinkingTimer(senderOpenId);
         if (fromEarlySend) {
           // Early-send replaces the 7s wait; skip directly to 3-min interval
-          noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+          setThinkingTimer(senderOpenId, setInterval(sendThinking, 3 * 60 * 1000));
         } else {
           // Initial setup: wait 7s, then show "正在思考", then repeat every 3m
-          noticeTimer = setTimeout(() => {
+          const initial = setTimeout(() => {
             sendThinking();
             if (!pendingQuestions.has(senderOpenId)) {
-              noticeTimer = setInterval(sendThinking, 3 * 60 * 1000);
+              setThinkingTimer(senderOpenId, setInterval(sendThinking, 3 * 60 * 1000));
             }
           }, 7000);
+          setThinkingTimer(senderOpenId, initial);
         }
       };
 
@@ -619,19 +668,21 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
           resetThinkingTimer,
         );
       } catch (err) {
-        clearTimeout(noticeTimer);
-        clearInterval(noticeTimer);
+        clearThinkingTimer(senderOpenId);
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error("[feishu] processMessage error:", err);
         void sendReply(event.message.message_id, event.message.chat_id, `❌ 处理消息时发生错误：${errMsg}`);
         return;
       } finally {
-        // Cancel both the initial delay and the repeat interval.
-        clearTimeout(noticeTimer);
-        clearInterval(noticeTimer);
+        // Cancel any remaining thinking timer for this sender
+        clearThinkingTimer(senderOpenId);
       }
       if (!pendingQuestions.has(senderOpenId) && heldMessages.has(senderOpenId)) {
         await drainHeldMessages(senderOpenId, messageHandler);
+      }
+      } catch (err) {
+        console.error(`[feishu] Unhandled error in message handler (msg_id=${(data as MessageReceiveEvent)?.message?.message_id ?? "unknown"}):`, err);
+        // Don't rethrow — keeps the event handler alive
       }
     },
 

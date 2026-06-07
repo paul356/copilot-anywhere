@@ -39,17 +39,40 @@ export interface QueuedMessage {
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const RECOVERABLE_PATTERNS = /connection|EADDR|ECONN|timeout|ENOTFOUND|socket hang up|pipe/i;
+const RECOVERABLE_PATTERNS = /connection|EADDR|ECONN|ETIMEDOUT|ENOTFOUND|socket hang up|pipe/i;
+const FATAL_TIMEOUT_PATTERNS = /message processing timed out|no activity/i;
 const CLI_COMMAND_TIMEOUT_MS = 15_000; // 15s for CLI slash command TUI output
 const CLI_COMMAND_SETTLE_MS = 1_500;   // wait 1.5s for TUI to finish rendering
 
 function isRecoverable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
+  if (FATAL_TIMEOUT_PATTERNS.test(msg)) return false;
   return RECOVERABLE_PATTERNS.test(msg);
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Creates a promise that rejects after `ms` milliseconds of inactivity.
+ * Call `reset()` on every activity signal (session event, text delta, etc.).
+ * Call `clear()` when the operation completes normally to cancel the timer.
+ */
+function createActivityTimeout(ms: number): {
+  promise: Promise<never>;
+  reset: () => void;
+  clear: () => void;
+} {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let rejectPromise: ((err: Error) => void) | undefined;
+  const promise = new Promise<never>((_, reject) => { rejectPromise = reject; });
+  const reset = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => rejectPromise!(new Error("Copilot is not responding (no activity for 3 minutes)")), ms);
+  };
+  const clear = () => { if (timer) clearTimeout(timer); };
+  return { promise, reset, clear };
 }
 
 /** Strip ANSI escape codes and cursor movement sequences from PTY output */
@@ -534,7 +557,13 @@ export class MessageHandler {
           });
 
           const t0 = Date.now();
-          const fullText = await new Promise<string>((resolve, reject) => {
+          const INACTIVITY_TIMEOUT_MS = 3 * 60 * 1000; // 3 min no activity → timeout
+          const activity = createActivityTimeout(INACTIVITY_TIMEOUT_MS);
+          activity.reset();
+          const unsubActivity = session.on(() => activity.reset());
+
+          const fullText = await Promise.race([
+            new Promise<string>((resolve, reject) => {
             let fullText = "";
             const unsubDelta = session.on("assistant.message_delta", (event) => {
               const chunk = event.data.deltaContent;
@@ -547,6 +576,8 @@ export class MessageHandler {
               unsubDelta();
               unsubIdle();
               unsubDebug();
+              unsubActivity();
+              activity.clear();
               this.sessionChannels.delete(session.sessionId);
               this.activeCallbacks.delete(channelId);
               if (sessionError) {
@@ -563,12 +594,16 @@ export class MessageHandler {
               unsubDelta();
               unsubIdle();
               unsubDebug();
+              unsubActivity();
+              activity.clear();
               this.sessionChannels.delete(session.sessionId);
               this.activeCallbacks.delete(channelId);
               console.error(`[message-handler] Prompt send failed: ${err instanceof Error ? err.message : String(err)}`);
               reject(err instanceof Error ? err : new Error(String(err)));
             });
-          });
+            }),
+            activity.promise,
+          ]);
         });
         break;
       }
@@ -613,10 +648,10 @@ export class MessageHandler {
   ): Promise<void> {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const timeout = this.options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+        const HARD_TIMEOUT_MS = 30 * 60 * 1000; // 30 min safety net; activity timeout handles detection
         await Promise.race([
           fn(),
-          sleep(timeout).then(() => { throw new Error("Message processing timed out"); }),
+          sleep(HARD_TIMEOUT_MS).then(() => { throw new Error("Message processing timed out (30 min hard limit)"); }),
         ]);
         return;
       } catch (err) {
