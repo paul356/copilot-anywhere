@@ -133,6 +133,12 @@ export async function getOrCreateSession(
   port: number,
   options: SessionOptions = {},
 ): Promise<CopilotSession> {
+  // Ensure this workspace has a pool slot (may evict oldest non-busy).
+  if (wsName !== "default") {
+    ensurePoolSlot(wsName);
+  }
+
+  recordPoolUse(wsName);
   const cacheKey = `${wsName}:${options.workingDirectory ?? "cwd"}`;
   const cached = sessionCache.get(cacheKey);
   if (cached) return cached;
@@ -214,4 +220,85 @@ export function invalidateSession(wsName: string, workingDir?: string): void {
 /** Invalidate all cached sessions (e.g., after CLI restart) */
 export function invalidateAllSessions(): void {
   sessionCache.clear();
+}
+
+// ── Workspace Pool ────────────────────────────────────────────────
+// Tracks which workspaces are "active" (have a copilot session) and
+// enforces a soft cap.  When the cap is hit, the oldest non-busy
+// workspace is evicted (its session invalidated).
+
+interface PoolEntry {
+  lastUsed: number;
+  busy: boolean;
+}
+
+const workspacePool = new Map<string, PoolEntry>();
+const MAX_ACTIVE = 5;
+
+/** Ensure the pool has a slot for `wsName`. If full, evicts the oldest non-busy workspace (excluding "default"). */
+export function ensurePoolSlot(wsName: string): void {
+  if (workspacePool.has(wsName)) return;
+
+  if (workspacePool.size < MAX_ACTIVE) {
+    workspacePool.set(wsName, { lastUsed: Date.now(), busy: false });
+    console.log(`[copilot-client] Pool slot allocated for '${wsName}' (${workspacePool.size}/${MAX_ACTIVE})`);
+    return;
+  }
+
+  // Find oldest non-busy workspace to evict.
+  let oldestKey: string | undefined;
+  let oldestTime = Infinity;
+  for (const [key, entry] of workspacePool) {
+    if (key === "default" || entry.busy) continue;
+    if (entry.lastUsed < oldestTime) {
+      oldestTime = entry.lastUsed;
+      oldestKey = key;
+    }
+  }
+
+  if (!oldestKey) {
+    console.warn(`[copilot-client] All ${MAX_ACTIVE} workspaces are busy — cannot allocate slot for '${wsName}'`);
+    return; // Caller will fall back to default or retry.
+  }
+
+  console.log(`[copilot-client] Evicting workspace '${oldestKey}' (last used ${Math.round((Date.now() - oldestTime) / 1000)}s ago) to make room for '${wsName}'`);
+  invalidateSession(oldestKey);
+  workspacePool.delete(oldestKey);
+  workspacePool.set(wsName, { lastUsed: Date.now(), busy: false });
+  console.log(`[copilot-client] Pool slot allocated for '${wsName}' (${workspacePool.size}/${MAX_ACTIVE})`);
+}
+
+/** Mark a workspace as busy (processing a prompt). */
+export function markPoolBusy(wsName: string): void {
+  const entry = workspacePool.get(wsName);
+  if (entry) entry.busy = true;
+}
+
+/** Mark a workspace as idle. */
+export function markPoolIdle(wsName: string): void {
+  const entry = workspacePool.get(wsName);
+  if (entry) entry.busy = false;
+}
+
+/** Record that the workspace was just used (updates lastUsed). */
+export function recordPoolUse(wsName: string): void {
+  const entry = workspacePool.get(wsName);
+  if (entry) entry.lastUsed = Date.now();
+}
+
+/** Remove a workspace from the pool (e.g., on ws delete). */
+export function removeFromPool(wsName: string): void {
+  invalidateSession(wsName);
+  workspacePool.delete(wsName);
+}
+
+/** Clean up all pooled workspaces. */
+export function clearPool(): void {
+  invalidateAllSessions();
+  workspacePool.clear();
+}
+
+/** Check if a workspace is in the pool and currently busy. */
+export function isPoolBusy(wsName: string): boolean {
+  return workspacePool.get(wsName)?.busy ?? false;
 }

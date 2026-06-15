@@ -12,9 +12,11 @@
  */
 
 import { CopilotSession } from "@github/copilot-sdk";
-import { RoutedMessage, executeMaxCommand } from "./command-router.js";
+import { RoutedMessage, executeMaxCommand, type Attachment } from "./command-router.js";
 import { CLIProcess } from "./cli-process.js";
 import { getActiveWorkspace } from "./store/db.js";
+import { getClient } from "./copilot/client.js";
+import { config } from "./config.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -52,6 +54,81 @@ function isRecoverable(err: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── Model capability check (cached) ───────────────────────────────
+
+/** Cached result of the last model capability query. */
+let _modelVisionSupport: { modelId: string; supportsVision: boolean } | null = null;
+
+/**
+ * Check whether the currently configured model supports vision/image inputs.
+ * Result is cached per model ID — re-fetches only when the model changes.
+ */
+async function modelSupportsVision(): Promise<boolean> {
+  const modelId = config.copilotModel;
+  if (_modelVisionSupport && _modelVisionSupport.modelId === modelId) {
+    return _modelVisionSupport.supportsVision;
+  }
+  try {
+    const client = await getClient();
+    const models = await client.listModels();
+    const current = models.find((m) => m.id === modelId);
+    const supportsVision = current?.capabilities?.supports?.vision ?? false;
+    _modelVisionSupport = { modelId, supportsVision };
+    console.log(`[message-handler] Model vision support: model=${modelId} vision=${supportsVision}`);
+    return supportsVision;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[message-handler] Could not check model capabilities: ${msg}. Assuming no vision support.`);
+    return false;
+  }
+}
+
+/**
+ * Filter attachments against model capabilities.
+ * - blob type attachments (images) require vision support
+ * - file type attachments are always allowed (agent can read them)
+ *
+ * Returns the filtered list and a warning message (empty string if all good).
+ */
+async function filterAttachments(
+  attachments: Attachment[],
+): Promise<{ filtered: Attachment[]; warning: string }> {
+  if (!attachments || attachments.length === 0) {
+    return { filtered: [], warning: "" };
+  }
+
+  const hasBlobs = attachments.some((a) => a.type === "blob");
+  if (!hasBlobs) {
+    // Only file-type attachments — always allowed
+    return { filtered: attachments, warning: "" };
+  }
+
+  const supportsVision = await modelSupportsVision();
+  if (supportsVision) {
+    return { filtered: attachments, warning: "" };
+  }
+
+  // Model doesn't support vision — strip blob attachments, keep files
+  const stripped: string[] = [];
+  const kept = attachments.filter((a) => {
+    if (a.type === "blob") {
+      stripped.push(a.displayName || a.mimeType);
+      return false;
+    }
+    return true;
+  });
+
+  const warning = stripped.length > 0
+    ? `\n\n⚠️ 当前模型不支持图片输入，已跳过：${stripped.join("、")}。`
+    : "";
+
+  if (stripped.length > 0) {
+    console.log(`[message-handler] Stripped ${stripped.length} blob attachment(s) — model lacks vision: ${stripped.join(", ")}`);
+  }
+
+  return { filtered: kept, warning };
 }
 
 /**
@@ -357,18 +434,33 @@ async function collectPagerContent(
 
 // ── Message Handler ────────────────────────────────────────────────
 
+function wsKey(channelKey: string, wsName: string): string {
+  return `${channelKey}:${wsName}`;
+}
+
+/** Check whether any composite key starting with `channelKey:` is in the set. */
+function anyChannelMatch(set: Set<string>, channelKey: string): boolean {
+  for (const key of set) {
+    if (key.startsWith(channelKey + ":")) return true;
+  }
+  return false;
+}
+
 export class MessageHandler {
   private options: MessageHandlerOptions;
+  /** Composite-key queues: `${channelKey}:${wsName}` → items */
   private channelQueues = new Map<string, QueuedMessage[]>();
+  /** Composite-key processing flags */
   private channelProcessing = new Set<string>();
+  /** Composite-key cancellation flags */
   private channelCancels = new Set<string>();
-  /** Currently processing promises per channel — used for cancellation */
+  /** Currently processing promises per composite key — used for cancellation */
   private channelActive = new Map<string, { reject: (err: Error) => void }>();
-  /** Per-channel callbacks for the currently in-flight prompt (used by user input delegation) */
+  /** Composite-key callbacks for the currently in-flight prompt (used by user input delegation) */
   private activeCallbacks = new Map<string, MessageCallback>();
-  /** sessionId → channelKey for the in-flight prompt */
+  /** sessionId → composite key for the in-flight prompt */
   private sessionChannels = new Map<string, string>();
-  /** Per-channel pending user-input resolvers */
+  /** Composite-key pending user-input resolvers */
   private pendingInput = new Map<string, { resolve: (answer: string) => void }>();
 
   constructor(options: MessageHandlerOptions) {
@@ -381,44 +473,75 @@ export class MessageHandler {
     channelKey: string,
     callback: MessageCallback,
   ): Promise<void> {
+    // /max:* commands execute immediately — never queue, never block.
+    // This lets users switch workspaces / cancel / skip even when
+    // another workspace in the same channel is busy.
+    if (routed.type === "max-command") {
+      const wsName = getActiveWorkspace(channelKey);
+      console.log(`[message-handler] Dispatching max-command: /max:${routed.name} ${routed.args.join(" ")}`.trimEnd() + ` → channel=${channelKey} ws=${wsName}`);
+      const result = await executeMaxCommand(routed.name, routed.args, {
+        senderId: channelKey,
+        activeWorkspace: wsName,
+        channelKey,
+      });
+      console.log(`[message-handler] max-command result (${result.reply.length} chars): ${result.reply.slice(0, 120)}`);
+      callback(result.reply, true);
+      return;
+    }
+
+    // prompt / cli-command: queue by channelKey + workspace composite key.
+    // Different workspaces in the same channel are independent.
+    const wsName = getActiveWorkspace(channelKey);
+    const qKey = wsKey(channelKey, wsName);
+
     return new Promise((resolve, reject) => {
-      const queue = this.channelQueues.get(channelKey) ?? [];
+      const queue = this.channelQueues.get(qKey) ?? [];
       queue.push({ routed, callback, resolve, reject });
-      this.channelQueues.set(channelKey, queue);
-      this.processQueue(channelKey);
+      this.channelQueues.set(qKey, queue);
+      this.processQueue(qKey, channelKey, wsName);
     });
   }
 
-  /** Returns true if a channel already has an in-flight or queued message. */
-  isChannelBusy(channelKey: string): boolean {
-    return this.channelProcessing.has(channelKey);
+  /** Returns true if a channel (optionally scoped to a workspace) has an in-flight message. */
+  isChannelBusy(channelKey: string, wsName?: string): boolean {
+    if (wsName) {
+      return this.channelProcessing.has(wsKey(channelKey, wsName));
+    }
+    return anyChannelMatch(this.channelProcessing, channelKey);
   }
 
-  /** Cancel all in-flight and queued messages for a channel */
-  cancelChannel(channelId: string): void {
-    this.channelCancels.add(channelId);
-    const active = this.channelActive.get(channelId);
-    if (active) {
-      active.reject(new Error("Cancelled"));
-      this.channelActive.delete(channelId);
-    }
-    // Clear queued items
-    const queue = this.channelQueues.get(channelId);
-    if (queue) {
-      for (const item of queue) {
-        item.reject(new Error("Cancelled"));
+  /** Cancel all in-flight and queued messages for a channel (optionally scoped to a workspace). */
+  cancelChannel(channelId: string, wsName?: string): void {
+    const prefix = wsName ? wsKey(channelId, wsName) : `${channelId}:`;
+    const match = (key: string) => wsName ? key === prefix : key.startsWith(prefix);
+
+    // Find all matching composite keys
+    const targetKeys: string[] = [];
+    for (const key of this.channelQueues.keys()) { if (match(key)) targetKeys.push(key); }
+    for (const key of this.channelActive.keys()) { if (match(key) && !targetKeys.includes(key)) targetKeys.push(key); }
+
+    for (const key of targetKeys) {
+      this.channelCancels.add(key);
+      const active = this.channelActive.get(key);
+      if (active) {
+        active.reject(new Error("Cancelled"));
+        this.channelActive.delete(key);
       }
-      this.channelQueues.delete(channelId);
+      const queue = this.channelQueues.get(key);
+      if (queue) {
+        for (const item of queue) item.reject(new Error("Cancelled"));
+        this.channelQueues.delete(key);
+      }
     }
   }
 
   /** Flush all queues (e.g., on shutdown) */
   cancelAll(): void {
-    for (const [channelId, queue] of this.channelQueues) {
+    for (const [key, queue] of this.channelQueues) {
       for (const item of queue) {
         item.reject(new Error("Shutting down"));
       }
-      this.channelQueues.delete(channelId);
+      this.channelQueues.delete(key);
     }
     this.channelProcessing.clear();
   }
@@ -427,9 +550,8 @@ export class MessageHandler {
 
   /**
    * Called by copilot-client's onUserInputRequest handler when the LLM
-   * asks the user a question. Sends the question to the TUI channel
-   * and returns a Promise that resolves when the user answers via
-   * the /answer API endpoint.
+   * asks the user a question. Sends the question to the right channel
+   * and returns a Promise that resolves when the user answers.
    */
   async handleUserInput(
     sessionId: string,
@@ -437,10 +559,10 @@ export class MessageHandler {
     choices?: string[],
     allowFreeform?: boolean,
   ): Promise<string> {
-    const channelKey = this.sessionChannels.get(sessionId);
-    const callback = channelKey ? this.activeCallbacks.get(channelKey) : undefined;
+    const compositeKey = this.sessionChannels.get(sessionId);
+    const callback = compositeKey ? this.activeCallbacks.get(compositeKey) : undefined;
 
-    if (!channelKey || !callback) {
+    if (!compositeKey || !callback) {
       // No active channel — fallback answer so the conversation continues
       const choiceList = choices ? ` (${choices.join(", ")})` : "";
       return `The user cannot be reached right now. Question was: "${question}"${choiceList}`;
@@ -455,47 +577,48 @@ export class MessageHandler {
     // Wait for the answer indefinitely until the user responds or the
     // channel cancels the pending ask_user request.
     return new Promise<string>((resolve) => {
-      this.pendingInput.set(channelKey, { resolve });
+      this.pendingInput.set(compositeKey, { resolve });
     });
   }
 
   /**
-   * Called by the /answer API endpoint when the TUI user responds to
+   * Called by the /answer API endpoint when the user responds to
    * an ask_user question. Resolves the pending Promise in handleUserInput.
+   * compositeKey is `${channelKey}:${wsName}`.
    */
-  answerUserInput(channelKey: string, answer: string): boolean {
-    const pending = this.pendingInput.get(channelKey);
+  answerUserInput(compositeKey: string, answer: string): boolean {
+    const pending = this.pendingInput.get(compositeKey);
     if (!pending) return false;
-    this.pendingInput.delete(channelKey);
+    this.pendingInput.delete(compositeKey);
     pending.resolve(answer);
     return true;
   }
 
   // ── Queue processing ────────────────────────────────────────
 
-  private async processQueue(channelId: string): Promise<void> {
-    if (this.channelProcessing.has(channelId)) return;
-    this.channelProcessing.add(channelId);
+  private async processQueue(qKey: string, channelId: string, wsName: string): Promise<void> {
+    if (this.channelProcessing.has(qKey)) return;
+    this.channelProcessing.add(qKey);
 
     try {
-      const queue = this.channelQueues.get(channelId);
+      const queue = this.channelQueues.get(qKey);
       while (queue && queue.length > 0) {
         // Check cancellation before each item
-        if (this.channelCancels.has(channelId)) {
+        if (this.channelCancels.has(qKey)) {
           // Reject remaining items
           for (const item of queue) {
             item.reject(new Error("Cancelled"));
           }
-          this.channelQueues.delete(channelId);
+          this.channelQueues.delete(qKey);
           break;
         }
 
         const item = queue.shift()!;
         try {
           await new Promise<void>((resolve, reject) => {
-            this.channelActive.set(channelId, { reject });
-            this.processOne(item, channelId).then(resolve, reject).finally(() => {
-              this.channelActive.delete(channelId);
+            this.channelActive.set(qKey, { reject });
+            this.processOne(item, channelId, wsName).then(resolve, reject).finally(() => {
+              this.channelActive.delete(qKey);
             });
           });
           item.resolve();
@@ -509,19 +632,21 @@ export class MessageHandler {
         }
       }
     } finally {
-      this.channelProcessing.delete(channelId);
-      this.channelCancels.delete(channelId);
-      this.channelActive.delete(channelId);
+      this.channelProcessing.delete(qKey);
+      this.channelCancels.delete(qKey);
+      this.channelActive.delete(qKey);
     }
   }
 
-  private async processOne(item: QueuedMessage, channelId: string): Promise<void> {
+  private async processOne(item: QueuedMessage, channelId: string, wsName: string): Promise<void> {
     const { routed, callback } = item;
+    const qKey = wsKey(channelId, wsName);
 
     switch (routed.type) {
       case "max-command": {
-        console.log(`[message-handler] Dispatching max-command: /max:${routed.name} ${routed.args.join(" ")}`.trimEnd() + ` → channel=${channelId}`);
-        const wsName = getActiveWorkspace(channelId);
+        // Should never reach here — max-commands are handled immediately in handle().
+        // Defensive fallback.
+        console.log(`[message-handler] Dispatching max-command: /max:${routed.name} ${routed.args.join(" ")}`.trimEnd() + ` → channel=${channelId} ws=${wsName}`);
         const result = await executeMaxCommand(routed.name, routed.args, {
           senderId: channelId,
           activeWorkspace: wsName,
@@ -533,14 +658,23 @@ export class MessageHandler {
       }
 
       case "prompt": {
-        await this.handleWithRetry(channelId, async () => {
+        await this.handleWithRetry(channelId, wsName, async () => {
           const { session, workspaceName, workingDir } = await this.options.getSessionForChannel(channelId);
           console.log(`[message-handler] Prompt → session ${session.sessionId.slice(0, 8)}… ws=${workspaceName} dir=${workingDir ?? "cwd"} channel=${channelId}`);
           console.log(`[message-handler] Prompt text (${routed.text.length} chars): ${routed.text.slice(0, 200)}`);
 
-          // Store session→channel mapping so handleUserInput can find the right callback
-          this.sessionChannels.set(session.sessionId, channelId);
-          this.activeCallbacks.set(channelId, callback);
+          // Check model capabilities and filter attachments
+          const { filtered: safeAttachments, warning } = await filterAttachments(routed.attachments ?? []);
+          const effectivePrompt = safeAttachments.length > 0 && warning
+            ? routed.text + warning
+            : routed.text;
+          if (routed.attachments && routed.attachments.length > 0) {
+            console.log(`[message-handler] Attachments: ${routed.attachments.length} provided → ${safeAttachments.length} passed (${warning ? "vision not supported" : "all ok"})`);
+          }
+
+          // Store session→composite-key mapping so handleUserInput can find the right callback
+          this.sessionChannels.set(session.sessionId, qKey);
+          this.activeCallbacks.set(qKey, callback);
 
           // Debug: log all session events related to tools/permissions/errors
           // Track session.error events so we can report them to the user
@@ -579,7 +713,7 @@ export class MessageHandler {
               unsubActivity();
               activity.clear();
               this.sessionChannels.delete(session.sessionId);
-              this.activeCallbacks.delete(channelId);
+              this.activeCallbacks.delete(qKey);
               if (sessionError) {
                 console.error(`[message-handler] Prompt error: ${sessionError}`);
                 reject(new Error(sessionError));
@@ -590,14 +724,18 @@ export class MessageHandler {
               resolve(fullText);
             });
 
-            session.send({ prompt: routed.text }).catch((err: unknown) => {
+            const sendPayload: { prompt: string; attachments?: Attachment[] } = { prompt: effectivePrompt };
+            if (safeAttachments.length > 0) {
+              sendPayload.attachments = safeAttachments;
+            }
+            session.send(sendPayload).catch((err: unknown) => {
               unsubDelta();
               unsubIdle();
               unsubDebug();
               unsubActivity();
               activity.clear();
               this.sessionChannels.delete(session.sessionId);
-              this.activeCallbacks.delete(channelId);
+              this.activeCallbacks.delete(qKey);
               console.error(`[message-handler] Prompt send failed: ${err instanceof Error ? err.message : String(err)}`);
               reject(err instanceof Error ? err : new Error(String(err)));
             });
@@ -644,6 +782,7 @@ export class MessageHandler {
 
   private async handleWithRetry(
     channelId: string,
+    wsName: string,
     fn: () => Promise<void>,
   ): Promise<void> {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {

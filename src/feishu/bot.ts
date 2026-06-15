@@ -1,10 +1,14 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { randomUUID } from "crypto";
 import { config, persistFeishuAuthorizedOpenId, clearFeishuAuthorizedOpenId } from "../config.js";
-import { route, RoutedMessage, executeMaxCommand, CommandResult } from "../command-router.js";
+import { route, RoutedMessage, executeMaxCommand, CommandResult, type Attachment } from "../command-router.js";
 import { MessageHandler } from "../message-handler.js";
-import { isMessageProcessed, markMessageProcessed } from "../store/db.js";
+import { isMessageProcessed, markMessageProcessed, getActiveWorkspace } from "../store/db.js";
 import { buildCardContent, buildTextContent, buildQuestionCard, chunkMessage } from "./formatter.js";
+import { readFileSync } from "fs";
+import { unlink } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 
 let client: Lark.Client | undefined;
 let wsClient: Lark.WSClient | undefined;
@@ -17,24 +21,45 @@ interface PendingQuestion {
   question: string;
   choices: string[];
   allowFreeform: boolean;
+  /** Which workspace issued this question. */
+  wsName: string;
   cardMessageId?: string;
   cardSent?: boolean;
   cleanupTimer?: ReturnType<typeof setTimeout>;
 }
 
-/** openId → held plain text messages waiting for pending ask_user resolution */
-const heldMessages = new Map<string, Array<{ messageId: string; chatId: string; text: string }>>();
-
-function holdMessage(openId: string, messageId: string, chatId: string, text: string): void {
-  const queue = heldMessages.get(openId) ?? [];
-  queue.push({ messageId, chatId, text });
-  heldMessages.set(openId, queue);
+/** Helper: build the composite key used by MessageHandler for ask_user routing. */
+function feishuWsKey(openId: string, wsName: string): string {
+  return `feishu:${openId}:${wsName}`;
 }
 
-function takeHeldMessages(openId: string): Array<{ messageId: string; chatId: string; text: string }> {
-  const queue = heldMessages.get(openId) ?? [];
-  heldMessages.delete(openId);
+/** openId → per-workspace held plain text messages waiting for pending ask_user resolution */
+const heldMessages = new Map<string, Map<string, Array<{ messageId: string; chatId: string; text: string }>>>();
+
+function holdMessage(openId: string, wsName: string, messageId: string, chatId: string, text: string): void {
+  let wsMap = heldMessages.get(openId);
+  if (!wsMap) { wsMap = new Map(); heldMessages.set(openId, wsMap); }
+  const queue = wsMap.get(wsName) ?? [];
+  queue.push({ messageId, chatId, text });
+  wsMap.set(wsName, queue);
+}
+
+/** Drain held messages for a specific workspace only. */
+function takeHeldMessages(openId: string, wsName: string): Array<{ messageId: string; chatId: string; text: string }> {
+  const wsMap = heldMessages.get(openId);
+  if (!wsMap) return [];
+  const queue = wsMap.get(wsName) ?? [];
+  wsMap.delete(wsName);
+  if (wsMap.size === 0) heldMessages.delete(openId);
   return queue;
+}
+
+/** Check whether an openId has any held messages (for any workspace). */
+function hasHeldMessages(openId: string): boolean {
+  const wsMap = heldMessages.get(openId);
+  if (!wsMap) return false;
+  for (const q of wsMap.values()) { if (q.length > 0) return true; }
+  return false;
 }
 
 /** One-time pairing token — generated on demand, cleared after use or expiry. */
@@ -68,30 +93,49 @@ function invalidatePairingToken(): void {
   pairingToken = undefined;
 }
 
-/** openId → pending question waiting for user input */
-const pendingQuestions = new Map<string, PendingQuestion>();
-function clearPending(openId: string): PendingQuestion | undefined {
-  const pending = pendingQuestions.get(openId);
-  if (pending) {
-    if (pending.cleanupTimer) clearTimeout(pending.cleanupTimer);
-    pendingQuestions.delete(openId);
-  }
+/** openId → pending questions (multiple workspaces can ask simultaneously) */
+const pendingQuestions = new Map<string, PendingQuestion[]>();
+function clearPending(openId: string, wsName: string): PendingQuestion | undefined {
+  const list = pendingQuestions.get(openId);
+  if (!list) return undefined;
+  const idx = list.findIndex(p => p.wsName === wsName);
+  if (idx === -1) return undefined;
+  const [pending] = list.splice(idx, 1);
+  if (list.length === 0) pendingQuestions.delete(openId);
+  if (pending.cleanupTimer) clearTimeout(pending.cleanupTimer);
   return pending;
 }
 
-/** openId → thinking notice timer (shared across messages for the same sender) */
+/** Get the pending question for a specific workspace, or the active workspace's pending. */
+function getPendingFor(openId: string, wsName: string): PendingQuestion | undefined {
+  const list = pendingQuestions.get(openId);
+  if (!list) return undefined;
+  return list.find(p => p.wsName === wsName);
+}
+
+/** Check whether an openId has any pending question (for any workspace). */
+function hasAnyPending(openId: string): boolean {
+  const list = pendingQuestions.get(openId);
+  return list !== undefined && list.length > 0;
+}
+
+/** `${openId}:${wsName}` → thinking notice timer (independent per workspace) */
 const thinkingTimers = new Map<string, ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>();
-function clearThinkingTimer(openId: string): void {
-  const existing = thinkingTimers.get(openId);
+function thinkingTimerKey(openId: string, wsName: string): string {
+  return `${openId}:${wsName}`;
+}
+function clearThinkingTimer(openId: string, wsName: string): void {
+  const key = thinkingTimerKey(openId, wsName);
+  const existing = thinkingTimers.get(key);
   if (existing) {
     clearTimeout(existing);
     clearInterval(existing);
-    thinkingTimers.delete(openId);
+    thinkingTimers.delete(key);
   }
 }
-function setThinkingTimer(openId: string, timer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>): void {
-  clearThinkingTimer(openId);
-  thinkingTimers.set(openId, timer);
+function setThinkingTimer(openId: string, wsName: string, timer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>): void {
+  clearThinkingTimer(openId, wsName);
+  thinkingTimers.set(thinkingTimerKey(openId, wsName), timer);
 }
 
 /** openId+text → last processed timestamp for content-based dedup.
@@ -118,59 +162,130 @@ function isRecentDuplicate(openId: string, text: string): boolean {
   return false;
 }
 
-async function drainHeldMessages(openId: string, messageHandler: MessageHandler): Promise<void> {
-  const held = takeHeldMessages(openId);
+/** Download a Feishu image by image_key to a temp file and return the path. */
+async function downloadFeishuImage(imageKey: string, label: string): Promise<string | undefined> {
+  if (!client) return undefined;
+  try {
+    const resp = await client.im.v1.image.get({ path: { image_key: imageKey } });
+    if (!resp || typeof resp.writeFile !== "function") {
+      console.warn("[feishu] Unexpected image download response:", typeof resp);
+      return undefined;
+    }
+    const tmpPath = join(tmpdir(), `max-feishu-${label}-${Date.now()}.jpg`);
+    await resp.writeFile(tmpPath);
+    return tmpPath;
+  } catch (err) {
+    console.error(`[feishu] Failed to download image ${imageKey}:`, err instanceof Error ? err.message : String(err));
+    return undefined;
+  }
+}
+
+// ── File type helpers ─────────────────────────────────────
+
+/** Extensions that are always safe to read as UTF-8 text. */
+const TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "md", "json", "yaml", "yml", "xml", "html", "htm", "css", "scss", "sass", "less",
+  "js", "jsx", "mjs", "cjs", "ts", "tsx", "py", "pyw", "rb", "go", "rs", "java", "kt", "kts",
+  "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx", "cs", "php", "swift", "scala", "sh",
+  "bash", "zsh", "fish", "ps1", "bat", "cmd", "sql", "graphql", "gql", "proto", "toml",
+  "ini", "cfg", "conf", "env", "prisma", "vue", "svelte", "r", "lua", "dart", "elm",
+  "ex", "exs", "hs", "erl", "hrl", "ml", "mli", "nim", "zig", "v", "csv", "tsv", "log",
+  "rest", "text", "diff", "patch", "makefile", "dockerfile", "gemfile", "rakefile",
+]);
+
+function isTextFile(filename: string): boolean {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  return TEXT_FILE_EXTENSIONS.has(ext);
+}
+
+/** Extract filename from Content-Disposition header if available. */
+function extractFilenameFromHeaders(headers: Record<string, string> | undefined): string | undefined {
+  if (!headers) return undefined;
+  const cd = headers["content-disposition"] || headers["Content-Disposition"] || "";
+  const match = cd.match(/filename[*]?=(?:UTF-8''|"(?:[^"]|[\\]")*")?([^;"]+)/i);
+  return match?.[1]?.replace(/^["']|["']$/g, "");
+}
+
+/** Download a user-sent file from a Feishu message and return { tmpPath, filename }. */
+async function downloadFeishuFile(
+  messageId: string,
+  fileKey: string,
+  label: string,
+): Promise<{ tmpPath: string; filename: string } | undefined> {
+  if (!client) return undefined;
+  try {
+    const resp = await client.im.messageResource.get({
+      path: { message_id: messageId, file_key: fileKey },
+      params: { type: "file" },
+    });
+    if (!resp || typeof resp.writeFile !== "function") {
+      console.warn("[feishu] Unexpected file download response:", typeof resp);
+      return undefined;
+    }
+    const filename = extractFilenameFromHeaders(resp.headers) || `feishu-file-${label}`;
+    const ext = filename.split(".").pop()?.toLowerCase();
+    const tmpPath = join(tmpdir(), `max-feishu-${label}-${Date.now()}.${ext || "bin"}`);
+    await resp.writeFile(tmpPath);
+    return { tmpPath, filename };
+  } catch (err) {
+    console.error(`[feishu] Failed to download file ${fileKey}:`, err instanceof Error ? err.message : String(err));
+    return undefined;
+  }
+}
+
+async function drainHeldMessages(openId: string, wsName: string, messageHandler: MessageHandler): Promise<void> {
+  const held = takeHeldMessages(openId, wsName);
   if (held.length === 0) return;
-  console.log(`[feishu] drainHeldMessages: draining ${held.length} held message(s)`);
+  console.log(`[feishu] drainHeldMessages: draining ${held.length} held message(s) for ws=${wsName}`);
   for (const { messageId, chatId, text } of held) {
     const channelKey = `feishu:${openId}`;
     const routed = route(text, { senderId: openId, channelKey, messageId });
-    clearThinkingTimer(openId);
+    clearThinkingTimer(openId, wsName);
     let thinkingSent = false;
     const sendThinking = () => {
-      if (pendingQuestions.has(openId)) {
+      if (hasAnyPending(openId)) {
         console.log(`[feishu:drainHeld] sendThinking skipped (pending question) | pendingQ=true`);
-        clearThinkingTimer(openId);
+        clearThinkingTimer(openId, wsName);
         return;
       }
-      if (!messageHandler.isChannelBusy(channelKey)) {
-        console.log(`[feishu:drainHeld] sendThinking skipped (channel no longer busy) | busy=false`);
-        clearThinkingTimer(openId);
+      if (!messageHandler.isChannelBusy(channelKey, wsName)) {
+        console.log(`[feishu:drainHeld] sendThinking skipped (ws not busy) | busy=false ws=${wsName}`);
+        clearThinkingTimer(openId, wsName);
         return;
       }
       thinkingSent = true;
-      console.log(`[feishu:drainHeld] sendThinking fired | thinkingSent=${thinkingSent} busy=true pendingQ=false`);
+      console.log(`[feishu:drainHeld] sendThinking fired | thinkingSent=${thinkingSent} busy=true pendingQ=false ws=${wsName}`);
       void sendReply(messageId, chatId, "⏳ 正在思考...");
     };
     const resetThinkingTimer = (fromEarlySend: boolean = false) => {
-      clearThinkingTimer(openId);
+      clearThinkingTimer(openId, wsName);
       if (fromEarlySend) {
-        setThinkingTimer(openId, setInterval(sendThinking, 3 * 60 * 1000));
+        setThinkingTimer(openId, wsName, setInterval(sendThinking, 3 * 60 * 1000));
       } else {
         const initial = setTimeout(() => {
           sendThinking();
-          if (!pendingQuestions.has(openId)) {
-            setThinkingTimer(openId, setInterval(sendThinking, 3 * 60 * 1000));
+          if (!hasAnyPending(openId)) {
+            setThinkingTimer(openId, wsName, setInterval(sendThinking, 3 * 60 * 1000));
           }
         }, 7000);
-        setThinkingTimer(openId, initial);
+        setThinkingTimer(openId, wsName, initial);
       }
     };
     if (routed.type === "prompt" || routed.type === "cli-command") {
-      if (messageHandler.isChannelBusy(channelKey)) {
+      if (messageHandler.isChannelBusy(channelKey, wsName)) {
         void sendReply(messageId, chatId, "⏳ 前一个请求正在处理中，已加入队列。");
       } else {
         resetThinkingTimer();
       }
     }
     try {
-      await processMessage(routed, openId, messageId, chatId, messageHandler, resetThinkingTimer);
+      await processMessage(routed, openId, messageId, chatId, messageHandler, resetThinkingTimer, wsName);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error("[feishu] drainHeldMessages error:", err);
       void sendReply(messageId, chatId, `❌ 处理挂起消息时发生错误：${errMsg}`);
     } finally {
-      clearThinkingTimer(openId);
+      clearThinkingTimer(openId, wsName);
     }
   }
 }
@@ -267,6 +382,7 @@ async function processMessage(
   chatId: string,
   messageHandler: MessageHandler,
   onEarlySend: (fromEarlySend: boolean) => void,
+  wsName: string,
 ): Promise<string> {
   const channelKey = `feishu:${openId}`;
 
@@ -292,23 +408,28 @@ async function processMessage(
     const question = tryParseQuestion(responseText);
     if (question) {
       const questionId = randomUUID();
-      pendingQuestions.delete(openId);
-      pendingQuestions.set(openId, {
+      // Add to the per-workspace pending list (replace any old entry for the same workspace).
+      clearPending(openId, wsName);
+      const pending: PendingQuestion = {
         messageId,
         chatId,
         questionId,
         question: question.question,
         choices: question.choices,
         allowFreeform: question.allowFreeform,
+        wsName,
         cardSent: false,
-      });
-      console.log(`[feishu] new pending ask_user: allowFreeform=${question.allowFreeform} choices=[${question.choices.join(",")}] qid=${questionId.slice(0,8)}`);
+      };
+      const list = pendingQuestions.get(openId) ?? [];
+      list.push(pending);
+      pendingQuestions.set(openId, list);
+      console.log(`[feishu] new pending ask_user: ws=${wsName} allowFreeform=${question.allowFreeform} choices=[${question.choices.join(",")}] qid=${questionId.slice(0,8)}`);
       sendQuestionCard(messageId, chatId, question.question, question.choices, question.allowFreeform, questionId)
         .then(cardMessageId => {
-          const pending = pendingQuestions.get(openId);
-          if (pending) {
-            pending.cardMessageId = cardMessageId;
-            if (cardMessageId) pending.cardSent = true;
+          const fresh = getPendingFor(openId, wsName);
+          if (fresh) {
+            fresh.cardMessageId = cardMessageId;
+            if (cardMessageId) fresh.cardSent = true;
           }
         })
         .catch(err => console.error("[feishu] Failed to send question card:", err));
@@ -508,17 +629,98 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
       // v1: group chats check already done above.
 
-      // v1: only handle plain text messages.
-      if (event.message.message_type !== "text") {
+      // v1: handle plain text, image, and text-based file messages.
+      if (event.message.message_type !== "text" && event.message.message_type !== "image" && event.message.message_type !== "file") {
         await sendChunkedReply(
           event.message.message_id,
           event.message.chat_id,
-          "_(Sorry — I can only read text messages right now.)_"
+          "_(Sorry — I can only read text, images, and text-based files right now.)_"
         );
         return;
       }
 
-      const rawText = extractText(event.message.content);
+      let rawText: string;
+      let messageAttachments: Attachment[] = [];
+
+      if (event.message.message_type === "image") {
+        // Parse image_key from the message content
+        const content = JSON.parse(event.message.content) as { image_key?: string };
+        const imageKey = content.image_key;
+        if (imageKey) {
+          const tmpPath = await downloadFeishuImage(imageKey, "msg");
+          if (tmpPath) {
+            try {
+              const buffer = readFileSync(tmpPath);
+              const base64 = buffer.toString("base64");
+              messageAttachments.push({
+                type: "blob",
+                data: base64,
+                mimeType: "image/jpeg",
+                displayName: "image.jpg",
+              });
+            } catch (err) {
+              console.error("[feishu] Failed to read downloaded image:", err);
+            }
+            // Clean up temp file after reading
+            void unlink(tmpPath).catch(() => {});
+          } else {
+            await sendChunkedReply(
+              event.message.message_id,
+              event.message.chat_id,
+              "_(无法下载图片，请重试。)_"
+            );
+            return;
+          }
+        }
+        rawText = "请描述这张图片。";
+      } else if (event.message.message_type === "file") {
+        // Parse file_key from the message content
+        const content = JSON.parse(event.message.content) as { file_key?: string };
+        const fileKey = content.file_key;
+        if (!fileKey) {
+          rawText = "";
+        } else {
+          const result = await downloadFeishuFile(
+            event.message.message_id, fileKey, "file"
+          );
+          if (!result) {
+            await sendChunkedReply(
+              event.message.message_id,
+              event.message.chat_id,
+              "_(无法下载文件，请重试。)_"
+            );
+            return;
+          }
+          if (!isTextFile(result.filename)) {
+            void unlink(result.tmpPath).catch(() => {});
+            const ext = result.filename.split(".").pop()?.toLowerCase() ?? "";
+            await sendChunkedReply(
+              event.message.message_id,
+              event.message.chat_id,
+              `_(暂不支持 "${ext}" 文件类型。目前支持: ${[...TEXT_FILE_EXTENSIONS].slice(0, 10).join(", ")}… 等文本文件。)_`
+            );
+            return;
+          }
+          let fileContent: string;
+          try {
+            fileContent = readFileSync(result.tmpPath, "utf-8");
+          } catch {
+            void unlink(result.tmpPath).catch(() => {});
+            await sendChunkedReply(
+              event.message.message_id,
+              event.message.chat_id,
+              "_(文件无法以文本方式读取，可能包含二进制内容。)_"
+            );
+            return;
+          }
+          void unlink(result.tmpPath).catch(() => {});
+          // Prepend file name and content to prompt
+          rawText = `[文件: ${result.filename}]\n\n${fileContent}`;
+        }
+      } else {
+        rawText = extractText(event.message.content);
+      }
+
       const text = stripMentions(rawText);
       if (!text) return;
 
@@ -543,67 +745,75 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       // ── /max:cancel ────────────────────────────────────────
       if (text.trim() === "/max:cancel") {
         const channelKey = `feishu:${senderOpenId}`;
-        clearPending(senderOpenId);
-        clearThinkingTimer(senderOpenId);
-        heldMessages.delete(senderOpenId);
-        messageHandler.cancelChannel(channelKey);
+        const activeWs = getActiveWorkspace(channelKey);
+        clearPending(senderOpenId, activeWs);
+        clearThinkingTimer(senderOpenId, activeWs);
+        heldMessages.delete(senderOpenId); // clear all held for this user
+        messageHandler.cancelChannel(channelKey, activeWs);
         await sendChunkedReply(
           event.message.message_id,
           event.message.chat_id,
-          "⛔ 已取消当前操作。\n⛔ Current operation cancelled."
+          `⛔ 已取消当前操作 (${activeWs})。\n⛔ Current operation cancelled (${activeWs}).`
         );
         return;
       }
 
       // ── Pending question: route text as an answer ──────────────
-      const pending = pendingQuestions.get(senderOpenId);
-      if (pending) {
+      const channelKey = `feishu:${senderOpenId}`;
+      const activeWs = getActiveWorkspace(channelKey);
+      const activePending = getPendingFor(senderOpenId, activeWs);
+      if (activePending) {
         if (text === "/max:skip") {
-          clearPending(senderOpenId);
-          messageHandler.answerUserInput(`feishu:${senderOpenId}`, "(User skipped the question.)");
-          await drainHeldMessages(senderOpenId, messageHandler);
+          clearPending(senderOpenId, activeWs);
+          messageHandler.answerUserInput(feishuWsKey(senderOpenId, activeWs), "(User skipped the question.)");
+          await drainHeldMessages(senderOpenId, activeWs, messageHandler);
           return;
         }
         if (text.startsWith("/max:")) {
           // Cancel the question, answer with placeholder, then fall through to process the command.
-          clearPending(senderOpenId);
-          messageHandler.answerUserInput(`feishu:${senderOpenId}`, "(User sent a command instead of answering.)");
+          clearPending(senderOpenId, activeWs);
+          messageHandler.answerUserInput(feishuWsKey(senderOpenId, activeWs), "(User sent a command instead of answering.)");
           // fall through
         } else {
-          const answer = resolveChoiceAnswer(text, pending.choices);
-          const isChoice = isValidChoiceAnswer(text, pending.choices);
-          if (!pending.allowFreeform) {
-            if (!pending.cardSent) {
-              holdMessage(senderOpenId, event.message.message_id, event.message.chat_id, text);
+          const answer = resolveChoiceAnswer(text, activePending.choices);
+          const isChoice = isValidChoiceAnswer(text, activePending.choices);
+          if (!activePending.allowFreeform) {
+            if (!activePending.cardSent) {
+              holdMessage(senderOpenId, activeWs, event.message.message_id, event.message.chat_id, text);
               return;
             }
             if (!isChoice) {
-              holdMessage(senderOpenId, event.message.message_id, event.message.chat_id, text);
+              holdMessage(senderOpenId, activeWs, event.message.message_id, event.message.chat_id, text);
               const newCardMessageId = await sendQuestionCard(
                 event.message.message_id,
                 event.message.chat_id,
-                pending.question,
-                pending.choices,
-                pending.allowFreeform,
-                pending.questionId,
+                activePending.question,
+                activePending.choices,
+                activePending.allowFreeform,
+                activePending.questionId,
               );
               if (newCardMessageId) {
-                pending.cardMessageId = newCardMessageId;
-                pending.cardSent = true;
+                activePending.cardMessageId = newCardMessageId;
+                activePending.cardSent = true;
               }
               return;
             }
           }
-          if (!pending.cardSent) {
-            // Card not yet delivered; hold this response until ask_user is active.
-            holdMessage(senderOpenId, event.message.message_id, event.message.chat_id, text);
+          if (!activePending.cardSent) {
+            holdMessage(senderOpenId, activeWs, event.message.message_id, event.message.chat_id, text);
             return;
           }
-          clearPending(senderOpenId);
-          messageHandler.answerUserInput(`feishu:${senderOpenId}`, answer);
-          await drainHeldMessages(senderOpenId, messageHandler);
+          clearPending(senderOpenId, activeWs);
+          messageHandler.answerUserInput(feishuWsKey(senderOpenId, activeWs), answer);
+          await drainHeldMessages(senderOpenId, activeWs, messageHandler);
           return;
         }
+      } else if (hasAnyPending(senderOpenId)) {
+        // Other workspace(s) have pending questions, but the active workspace doesn't.
+        // Hold the message for the active ws in case it's meant for a pending question
+        // after the user switches. Actually — if it doesn't start with /max:, treat it
+        // as a regular prompt for the active workspace (don't hold).
+        // Only hold if the message might be an answer to a non-active workspace's question.
       }
 
       // For slow operations (prompts / CLI commands), notify the user.
@@ -611,45 +821,50 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       // Otherwise wait 7 s; if Copilot hasn't replied by then, send a notice.
       // Each early-send from processMessage() resets this timer so the
       // thinking notice only appears when the AI is truly stalled.
-      const channelKey = `feishu:${senderOpenId}`;
       const routed = route(text, { senderId: senderOpenId, channelKey, messageId: event.message.message_id });
-      // Clear any leftover thinking timer from a previous message for this sender
-      clearThinkingTimer(senderOpenId);
+
+      // Attach any image blobs from the incoming message
+      if (routed.type === "prompt" && messageAttachments.length > 0) {
+        routed.attachments = messageAttachments;
+      }
+
+      // Clear any leftover thinking timer for this sender + workspace
+      clearThinkingTimer(senderOpenId, activeWs);
       let thinkingSent = false;
       const sendThinking = () => {
-        if (pendingQuestions.has(senderOpenId)) {
+        if (hasAnyPending(senderOpenId)) {
           console.log(`[feishu:main] sendThinking skipped (pending question) | pendingQ=true`);
-          clearThinkingTimer(senderOpenId);
+          clearThinkingTimer(senderOpenId, activeWs);
           return;
         }
-        if (!messageHandler.isChannelBusy(channelKey)) {
-          console.log(`[feishu:main] sendThinking skipped (channel no longer busy) | busy=false`);
-          clearThinkingTimer(senderOpenId);
+        if (!messageHandler.isChannelBusy(channelKey, activeWs)) {
+          console.log(`[feishu:main] sendThinking skipped (ws not busy) | busy=false ws=${activeWs}`);
+          clearThinkingTimer(senderOpenId, activeWs);
           return;
         }
         thinkingSent = true;
-        console.log(`[feishu:main] sendThinking fired | thinkingSent=${thinkingSent} busy=true pendingQ=false`);
+        console.log(`[feishu:main] sendThinking fired | thinkingSent=${thinkingSent} busy=true pendingQ=false ws=${activeWs}`);
         void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
       };
       const resetThinkingTimer = (fromEarlySend: boolean = false) => {
-        clearThinkingTimer(senderOpenId);
+        clearThinkingTimer(senderOpenId, activeWs);
         if (fromEarlySend) {
           // Early-send replaces the 7s wait; skip directly to 3-min interval
-          setThinkingTimer(senderOpenId, setInterval(sendThinking, 3 * 60 * 1000));
+          setThinkingTimer(senderOpenId, activeWs, setInterval(sendThinking, 3 * 60 * 1000));
         } else {
           // Initial setup: wait 7s, then show "正在思考", then repeat every 3m
           const initial = setTimeout(() => {
             sendThinking();
-            if (!pendingQuestions.has(senderOpenId)) {
-              setThinkingTimer(senderOpenId, setInterval(sendThinking, 3 * 60 * 1000));
+            if (!hasAnyPending(senderOpenId)) {
+              setThinkingTimer(senderOpenId, activeWs, setInterval(sendThinking, 3 * 60 * 1000));
             }
           }, 7000);
-          setThinkingTimer(senderOpenId, initial);
+          setThinkingTimer(senderOpenId, activeWs, initial);
         }
       };
 
       if (routed.type === "prompt" || routed.type === "cli-command") {
-        if (messageHandler.isChannelBusy(channelKey)) {
+        if (messageHandler.isChannelBusy(channelKey, activeWs)) {
           void sendReply(event.message.message_id, event.message.chat_id, "⏳ 前一个请求正在处理中，已加入队列。");
         } else {
           resetThinkingTimer();
@@ -666,19 +881,20 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
           event.message.chat_id,
           messageHandler,
           resetThinkingTimer,
+          activeWs,
         );
       } catch (err) {
-        clearThinkingTimer(senderOpenId);
+        clearThinkingTimer(senderOpenId, activeWs);
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error("[feishu] processMessage error:", err);
         void sendReply(event.message.message_id, event.message.chat_id, `❌ 处理消息时发生错误：${errMsg}`);
         return;
       } finally {
-        // Cancel any remaining thinking timer for this sender
-        clearThinkingTimer(senderOpenId);
+        // Cancel any remaining thinking timer for this sender + workspace
+        clearThinkingTimer(senderOpenId, activeWs);
       }
-      if (!pendingQuestions.has(senderOpenId) && heldMessages.has(senderOpenId)) {
-        await drainHeldMessages(senderOpenId, messageHandler);
+      if (!hasAnyPending(senderOpenId) && hasHeldMessages(senderOpenId)) {
+        await drainHeldMessages(senderOpenId, activeWs, messageHandler);
       }
       } catch (err) {
         console.error(`[feishu] Unhandled error in message handler (msg_id=${(data as MessageReceiveEvent)?.message?.message_id ?? "unknown"}):`, err);
@@ -692,12 +908,16 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       const openId = evt.operator.openId;
       if (openId !== config.feishuAuthorizedOpenId) return;
       const payload = evt.action.value as { choice?: string; questionId?: string } | undefined;
-      if (!payload?.choice) return;
-      const pending = pendingQuestions.get(openId);
+      if (!payload?.choice || !payload?.questionId) return;
+
+      // Find the pending question by questionId (unique across all workspaces).
+      const list = pendingQuestions.get(openId);
+      const pending = list?.find(p => p.questionId === payload.questionId);
       if (!pending) {
         await sendReply(evt.messageId, evt.chatId, "❌ 该问题已失效。请重新发起。");
         return;
       }
+      // Re-check: the questionId in the card should match the pending entry we found.
       if (payload.questionId !== pending.questionId) {
         await sendReply(evt.messageId, evt.chatId, "⚠️ 你点击的是旧问题。请回答最新问题。已重新发送卡片。\n");
         const newCardMessageId = await sendQuestionCard(
@@ -709,10 +929,11 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         }
         return;
       }
-      clearPending(openId);
+      const wsName = pending.wsName;
+      clearPending(openId, wsName);
       void sendReply(evt.messageId, evt.chatId, `✅ 已选择：${payload.choice}`);
-      messageHandler.answerUserInput(`feishu:${openId}`, payload.choice);
-      await drainHeldMessages(openId, messageHandler);
+      messageHandler.answerUserInput(feishuWsKey(openId, wsName), payload.choice);
+      await drainHeldMessages(openId, wsName, messageHandler);
     },
   });
 

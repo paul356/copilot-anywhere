@@ -10,11 +10,12 @@ import { restartDaemon } from "../daemon.js";
 import { API_TOKEN_PATH, ensureMaxHome } from "../paths.js";
 
 import { MessageHandler } from "../message-handler.js";
-import { route } from "../command-router.js";
+import { route, type Attachment } from "../command-router.js";
+import { getActiveWorkspace } from "../store/db.js";
 
 // Set by daemon.ts at startup
 let _messageHandler: MessageHandler | undefined;
-type CancelFn = (channelId: string) => void;
+type CancelFn = (channelId: string, wsName?: string) => void;
 let _cancelChannel: CancelFn | undefined;
 
 export function setMessageHandler(mh: MessageHandler): void { _messageHandler = mh; }
@@ -97,7 +98,11 @@ app.get("/stream", (req: Request, res: Response) => {
 
 // Send a message to Copilot (same pass-through flow as Feishu)
 app.post("/message", (req: Request, res: Response) => {
-  const { prompt, connectionId } = req.body as { prompt?: string; connectionId?: string };
+  const { prompt, connectionId, attachments } = req.body as {
+    prompt?: string;
+    connectionId?: string;
+    attachments?: Attachment[];
+  };
 
   if (!prompt || typeof prompt !== "string") {
     res.status(400).json({ error: "Missing 'prompt' in request body" });
@@ -116,6 +121,11 @@ app.post("/message", (req: Request, res: Response) => {
 
   const channelKey = `tui:${connectionId}`;
   const result = route(prompt, { senderId: channelKey, channelKey });
+
+  // Attach any incoming attachments to the routed prompt
+  if (result.type === "prompt" && Array.isArray(attachments) && attachments.length > 0) {
+    result.attachments = attachments;
+  }
 
   _messageHandler.handle(result, channelKey, (text: string, done: boolean) => {
     const sseRes = sseClients.get(connectionId);
@@ -136,7 +146,7 @@ app.post("/message", (req: Request, res: Response) => {
   res.json({ status: "queued" });
 });
 
-// Cancel the current in-flight message for a specific TUI connection.
+// Cancel the current in-flight message for a specific TUI connection's active workspace.
 app.post("/cancel", async (req: Request, res: Response) => {
   const { connectionId } = req.body as { connectionId?: string };
 
@@ -146,7 +156,9 @@ app.post("/cancel", async (req: Request, res: Response) => {
   }
 
   if (_cancelChannel) {
-    _cancelChannel(`tui:${connectionId}`);
+    const channelKey = `tui:${connectionId}`;
+    const activeWs = getActiveWorkspace(channelKey);
+    _cancelChannel(channelKey, activeWs);
   }
   const sseRes = sseClients.get(connectionId);
   if (sseRes) {
@@ -176,7 +188,9 @@ app.post("/answer", (req: Request, res: Response) => {
     return;
   }
 
-  const ok = _messageHandler.answerUserInput(`tui:${connectionId}`, answer);
+  const channelKey = `tui:${connectionId}`;
+  const activeWs = getActiveWorkspace(channelKey);
+  const ok = _messageHandler.answerUserInput(`tui:${connectionId}:${activeWs}`, answer);
   res.json({ ok });
 });
 

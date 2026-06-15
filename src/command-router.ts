@@ -16,10 +16,15 @@ import { existsSync } from "fs";
 
 // ── Types ──────────────────────────────────────────────────────────
 
+/** Attachment that can be sent alongside a prompt to the model. */
+export type Attachment =
+  | { type: "file"; path: string; displayName?: string }
+  | { type: "blob"; data: string; mimeType: string; displayName?: string };
+
 export type RoutedMessage =
   | { type: "max-command"; name: string; args: string[]; senderId: string }
   | { type: "cli-command"; command: string; senderId: string }
-  | { type: "prompt"; text: string; workingDirectory?: string; senderId: string };
+  | { type: "prompt"; text: string; attachments?: Attachment[]; workingDirectory?: string; senderId: string };
 
 export interface CommandContext {
   senderId: string;

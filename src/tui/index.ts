@@ -1,8 +1,9 @@
-import * as readline from "readline";
+import { readMultiline } from "@toiroakr/read-multiline";
 import * as http from "http";
 import { exec, execFile } from "child_process";
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 import { HISTORY_PATH, API_TOKEN_PATH, TUI_DEBUG_LOG_PATH, ensureMaxHome } from "../paths.js";
+import type { Attachment } from "../command-router.js";
 
 const API_BASE = process.env.MAX_API_URL || "http://127.0.0.1:7777";
 
@@ -404,18 +405,6 @@ let activeRequestStartedAt = 0;
 // ── Persistent history ────────────────────────────────────
 const MAX_HISTORY = 1000;
 
-function loadHistory(): string[] {
-  try {
-    if (existsSync(HISTORY_PATH)) {
-      return readFileSync(HISTORY_PATH, "utf-8")
-        .split("\n")
-        .filter(Boolean)
-        .slice(-MAX_HISTORY);
-    }
-  } catch { /* ignore */ }
-  return [];
-}
-
 function saveHistoryLine(line: string): void {
   try {
     appendFileSync(HISTORY_PATH, line + "\n");
@@ -442,15 +431,9 @@ debugLog("session-start", {
   columns: process.stdout.columns || null,
   logPath: TUI_DEBUG_LOG_PATH,
 });
-const history = loadHistory();
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: `  ${C.coral("›")} `,
-  history,
-  historySize: MAX_HISTORY,
-});
+// Resolver to trigger the next readMultiline call after a response finishes.
+let resolveNextPrompt: (() => void) | null = null;
 
 // ── Welcome banner ────────────────────────────────────────
 function showBanner(): void {
@@ -472,8 +455,6 @@ function showStatus(model?: string, skillCount?: number): void {
   if (model) parts.push(`${C.dim("model:")} ${C.cyan(model)}`);
   if (skillCount !== undefined) parts.push(`${C.dim("skills:")} ${C.cyan(String(skillCount))}`);
   if (parts.length) console.log(`    ${parts.join("    ")}`);
-  console.log();
-  console.log(C.dim("    /max:help for max commands · all other /commands go to copilot · esc to cancel"));
   console.log();
 }
 
@@ -574,7 +555,7 @@ function connectSSE(): void {
               process.stdout.write("\n");
 
               // Collect user answer (one-shot, not a regular prompt)
-              rl.question(`  ${C.yellow("›")} `, (answer: string) => {
+              readMultiline(`  ${C.yellow("›")} `, { prefix: "", helpFooter: false, inlinePrompt: true }).then(([answer]: [string, any]) => {
                 const trimmed = answer.trim();
                 let resolved = trimmed;
                 // If choices provided and user typed a number, resolve to the choice text
@@ -610,7 +591,8 @@ function connectSSE(): void {
                 process.stdout.write("\n\n");
               }
               activeRequestStartedAt = 0;
-              rl.prompt();
+              // Signal the REPL loop to show the next prompt
+              if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
             }
           } catch (err) {
             debugLog("sse-event-parse-error", {
@@ -649,12 +631,13 @@ function connectSSE(): void {
 }
 
 // ── API helpers ───────────────────────────────────────────
-function sendMessage(prompt: string, requestId: number): void {
-  const body = JSON.stringify({ prompt, connectionId });
+function sendMessage(prompt: string, requestId: number, attachments?: Attachment[]): void {
+  const body = JSON.stringify({ prompt, connectionId, attachments });
   const url = new URL("/message", API_BASE);
   debugLog("message-send-start", {
     requestId,
     promptLength: prompt.length,
+    attachmentCount: attachments?.length ?? 0,
     connectionId: connectionId || null,
   });
 
@@ -681,7 +664,7 @@ function sendMessage(prompt: string, requestId: number): void {
         if (res.statusCode !== 200) {
           stopThinking("message-post-error");
           console.error(C.red(`  Error: ${data}`));
-          rl.prompt();
+          if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
         }
       });
     }
@@ -691,7 +674,7 @@ function sendMessage(prompt: string, requestId: number): void {
     stopThinking("message-request-error");
     debugLog("message-send-error", { requestId, error: err.message });
     console.error(C.red(`  Failed to send: ${err.message}`));
-    rl.prompt();
+    if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
   });
 
   req.write(body);
@@ -719,11 +702,11 @@ function apiGet(path: string, cb: (data: any) => void): void {
     res.on("data", (chunk) => (data += chunk));
     res.on("end", () => {
       try { cb(JSON.parse(data)); } catch { console.log(data); }
-      rl.prompt();
+      if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
     });
   }).on("error", (err) => {
     console.error(C.red(`  Error: ${err.message}`));
-    rl.prompt();
+    if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
   });
 }
 
@@ -739,12 +722,12 @@ function apiPost(path: string, body: Record<string, unknown>, cb: (data: any) =>
     res.on("data", (chunk) => (data += chunk));
     res.on("end", () => {
       try { cb(JSON.parse(data)); } catch { console.log(data); }
-      rl.prompt();
+      if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
     });
   });
   req.on("error", (err) => {
     console.error(C.red(`  Error: ${err.message}`));
-    rl.prompt();
+    if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
   });
   req.write(json);
   req.end();
@@ -761,12 +744,12 @@ function apiDelete(path: string, cb: (data: any) => void): void {
     res.on("data", (chunk) => (data += chunk));
     res.on("end", () => {
       try { cb(JSON.parse(data)); } catch { console.log(data); }
-      rl.prompt();
+      if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
     });
   });
   req.on("error", (err) => {
     console.error(C.red(`  Error: ${err.message}`));
-    rl.prompt();
+    if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
   });
   req.end();
 }
@@ -776,7 +759,7 @@ function sendAnswer(answer: string): void {
   debugLog("answer-send", { connectionId, answerLength: answer.length });
   if (!connectionId) {
     console.error(C.red("  Failed to answer: not connected.\n"));
-    rl.prompt();
+    if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
     return;
   }
   const json = JSON.stringify({ connectionId, answer });
@@ -799,12 +782,12 @@ function sendAnswer(answer: string): void {
         }
       } catch { /* ignore */ }
       debugLog("answer-sent", { ok: true });
-      // rl.prompt() is called by the message event handler after streaming completes
+      // resolveNextPrompt is called by the message event handler after streaming completes
     });
   });
   req.on("error", (err) => {
     console.error(C.red(`  Failed to send answer: ${err.message}\n`));
-    rl.prompt(); // Restore prompt on error — LLM will timeout without the answer
+    if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; } // Restore prompt on error — LLM will timeout without the answer
   });
   req.write(json);
   req.end();
@@ -815,7 +798,7 @@ function sendCancel(): void {
   debugLog("cancel-send", { requestId: activeRequestId, isStreaming });
   if (!connectionId) {
     console.error(C.red("  Failed to cancel: not connected."));
-    rl.prompt();
+    if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
     return;
   }
   const json = JSON.stringify({ connectionId });
@@ -835,12 +818,12 @@ function sendCancel(): void {
       isStreaming = false;
       streamedContent = "";
       console.log(C.dim("    ⛔ cancelled\n"));
-      rl.prompt();
+      if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
     });
   });
   req.on("error", (err) => {
     console.error(C.red(`  Failed to cancel: ${err.message}`));
-    rl.prompt();
+    if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
   });
   req.write(json);
   req.end();
@@ -853,44 +836,27 @@ function cmdHelp(): void {
   console.log();
   console.log(`    ${C.coral("/max:help")}              show this help`);
   console.log(`    ${C.coral("/max:copy")}              copy last response`);
+  console.log(`    ${C.coral("/max:image <path>")}      send an image to the model`);
   console.log(`    ${C.coral("/max:restart")}           restart daemon`);
   console.log(`    ${C.coral("/max:clear")}             clear screen`);
   console.log(`    ${C.coral("/quit")}  ${C.coral("/exit")}          exit`);
   console.log();
+  console.log(C.dim("    enter=submit  alt+enter=newline  esc=cancel"));
   console.log(C.dim("    all other /commands are forwarded to the Copilot agent"));
   console.log(C.dim("    press escape to cancel a running response"));
   console.log(C.dim("    set MAX_TUI_DEBUG=1 to write lifecycle logs to ~/.max/tui-debug.log"));
   console.log();
 }
 
-// ── Main ──────────────────────────────────────────────────
-showBanner();
-console.log(C.dim("    connecting..."));
-connectSSE();
-
-// Wait a moment for SSE connection before showing prompt
-setTimeout(() => {
-  rl.prompt();
-
-  // Listen for Escape key to cancel in-flight messages
-  if (process.stdin.isTTY) {
-    process.stdin.on("keypress", (_str: string, key: readline.Key) => {
-      if (key && key.name === "escape") {
-        sendCancel();
-      }
-    });
-  }
-
-  rl.on("line", (line) => {
-    const trimmed = line.trim();
+// ── Input processor (called when user submits a line) ──
+function processUserInput(trimmed: string): void {
     if (isThinking) {
-      // Ignore input while waiting for a response; ESC (cancel) still works
-      // via the separate keypress handler.
+      if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
       return;
     }
     if (!trimmed) {
       debugLog("input-empty-line");
-      rl.prompt();
+      if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
       return;
     }
     debugLog("input-line", {
@@ -942,7 +908,7 @@ setTimeout(() => {
       process.exit(0);
     }
 
-    if (trimmed === "/max:help") { cmdHelp(); return; }
+    if (trimmed === "/max:help") { cmdHelp(); if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; } return; }
 
     if (trimmed === "/max:restart") {
       apiPost("/restart", {}, () => {
@@ -953,20 +919,20 @@ setTimeout(() => {
 
     if (trimmed === "/max:clear") {
       console.clear();
-      rl.prompt();
+      if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
       return;
     }
 
     if (trimmed === "/max:copy") {
       if (!lastResponse) {
         console.log(C.dim("  No response to copy.\n"));
-        rl.prompt();
+        if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
         return;
       }
       const tryClipboard = (cmds: [string, string[]][], idx: number) => {
         if (idx >= cmds.length) {
           console.log(C.dim("  Clipboard tool not found (install xclip or xsel).\n"));
-          rl.prompt();
+          if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
           return;
         }
         const [cmd, args] = cmds[idx];
@@ -975,7 +941,7 @@ setTimeout(() => {
             tryClipboard(cmds, idx + 1);
           } else {
             console.log(C.dim("  ✓ Copied to clipboard.\n"));
-            rl.prompt();
+            if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
           }
         });
         proc.stdin?.write(lastResponse);
@@ -989,6 +955,61 @@ setTimeout(() => {
       return;
     }
 
+    // ── /max:image <path> [prompt] ──────────────────────────
+    if (trimmed.startsWith("/max:image ")) {
+      const rest = trimmed.slice("/max:image ".length).trim();
+      if (!rest) {
+        console.log(C.dim("  Usage: /max:image <path> [prompt]\n"));
+        if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
+        return;
+      }
+
+      const spaceIdx = rest.indexOf(" ");
+      const imgPath = spaceIdx > 0 ? rest.slice(0, spaceIdx) : rest;
+      const userPrompt = spaceIdx > 0 ? rest.slice(spaceIdx + 1).trim() : "";
+
+      const resolved = imgPath.startsWith("~")
+        ? imgPath.replace(/^~/, process.env.HOME || "/home")
+        : imgPath;
+
+      if (!existsSync(resolved)) {
+        console.log(C.red(`  File not found: ${imgPath}\n`));
+        if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
+        return;
+      }
+
+      let buffer: Buffer;
+      try {
+        buffer = readFileSync(resolved);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(C.red(`  Failed to read file: ${msg}\n`));
+        if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
+        return;
+      }
+      const base64 = buffer.toString("base64");
+
+      const ext = imgPath.split(".").pop()?.toLowerCase() ?? "";
+      const mimeMap: Record<string, string> = {
+        png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+        gif: "image/gif", webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml",
+      };
+      const mimeType = mimeMap[ext] || "image/png";
+
+      const displayName = imgPath.split("/").pop() || "image";
+      const attachment: Attachment = { type: "blob", data: base64, mimeType, displayName };
+      const prompt = userPrompt || "请描述这张图片。";
+
+      console.log(`${`  ${C.coral("YOU")}     `}${C.dim(`[图片: ${displayName}]`)} ${prompt}`);
+      saveHistoryLine(trimmed);
+
+      activeRequestId += 1;
+      activeRequestStartedAt = Date.now();
+      startThinking();
+      sendMessage(prompt, activeRequestId, [attachment]);
+      return;
+    }
+
     // Send message to daemon
     activeRequestId += 1;
     activeRequestStartedAt = Date.now();
@@ -999,11 +1020,37 @@ setTimeout(() => {
     });
     startThinking();
     sendMessage(trimmed, activeRequestId);
-  });
+  }
 
-  rl.on("close", () => {
-    trimHistoryFile();
-    console.log(C.dim("\n    bye.\n"));
-    process.exit(0);
-  });
+// ── Main ──────────────────────────────────────────────────
+showBanner();
+console.log(C.dim("    connecting..."));
+connectSSE();
+
+setTimeout(() => {
+  // Listen for ESC to cancel in-flight messages
+  if (process.stdin.isTTY) {
+    process.stdin.on("keypress", (_str: string, key: any) => {
+      if (key && key.name === "escape") {
+        sendCancel();
+      }
+    });
+  }
+
+  // Main REPL loop: readMultiline is called only when not thinking.
+  (async () => {
+    while (true) {
+      const [text, result] = await readMultiline(`  ${C.coral("›")} `, { prefix: "", helpFooter: false, inlinePrompt: true });
+      if (result?.kind === "cancel" || result?.kind === "eof") {
+        trimHistoryFile();
+        console.log(C.dim("\n    bye.\n"));
+        process.exit(0);
+      }
+      const trimmed = text.trim();
+      if (!trimmed) continue;
+      processUserInput(trimmed);
+      // Wait for the response to finish before showing the next prompt
+      await new Promise<void>((resolve) => { resolveNextPrompt = resolve; });
+    }
+  })();
 }, 1000);

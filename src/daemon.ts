@@ -1,4 +1,4 @@
-import { getClient, stopClient, setUserInputDelegate } from "./copilot-client.js";
+import { getClient, stopClient, setUserInputDelegate, clearPool } from "./copilot-client.js";
 import { startApiServer } from "./api/server.js";
 import { createBot, startBot, stopBot, sendProactiveMessage } from "./telegram/bot.js";
 import {
@@ -170,7 +170,7 @@ async function main(): Promise<void> {
   // Wire up to API server (same pass-through flow as Feishu)
   const { setMessageHandler, setCancelChannel } = await import("./api/server.js");
   setMessageHandler(handler);
-  setCancelChannel((channelId: string) => handler.cancelChannel(channelId));
+  setCancelChannel((channelId: string, wsName?: string) => handler.cancelChannel(channelId, wsName));
 
   // Start HTTP API for TUI
   await startApiServer();
@@ -248,6 +248,7 @@ async function shutdown(): Promise<void> {
   }
 
   messageHandler?.cancelAll();
+  clearPool();  // clean up workspace pool entries
   try { await cliProcess?.stop(); } catch { /* best effort */ }
   try { await stopClient(); } catch { /* best effort */ }
   closeDb();
@@ -270,6 +271,7 @@ export async function restartDaemon(): Promise<void> {
 
   // Cancel all in-flight message processing
   messageHandler?.cancelAll();
+  clearPool();
 
   try { await cliProcess?.stop(); } catch { /* best effort */ }
   try { await stopClient(); } catch { /* best effort */ }

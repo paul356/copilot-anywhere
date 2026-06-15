@@ -4,11 +4,12 @@ import { chunkMessage, toTelegramMarkdown } from "./formatter.js";
 import { parseIndex } from "../wiki/index-manager.js";
 import { ensureWikiStructure } from "../wiki/fs.js";
 import { restartDaemon } from "../daemon.js";
-import { route, executeMaxCommand } from "../command-router.js";
+import { route, executeMaxCommand, type Attachment } from "../command-router.js";
 import { getActiveWorkspace } from "../store/db.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFile, unlink } from "fs/promises";
+import { readFileSync } from "fs";
 import { MessageHandler } from "../message-handler.js";
 
 
@@ -34,6 +35,44 @@ async function downloadTelegramPhoto(
   } catch {
     return undefined;
   }
+}
+
+/** Download a Telegram document to a temp file and return { path, filename }. */
+async function downloadTelegramDocument(
+  fileId: string,
+  label: string,
+): Promise<{ path: string; filename: string } | undefined> {
+  if (!bot || !config.telegramBotToken) return undefined;
+  try {
+    const file = await bot.api.getFile(fileId);
+    if (!file.file_path) return undefined;
+    const filename = file.file_path.split("/").pop() || `doc-${label}`;
+    const url = `https://api.telegram.org/file/bot${config.telegramBotToken}/${file.file_path}`;
+    const response = await fetch(url);
+    if (!response.ok) return undefined;
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    const tmpPath = join(tmpdir(), `max-tg-${label}-${Date.now()}-${filename}`);
+    await writeFile(tmpPath, buffer);
+    return { path: tmpPath, filename };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Extensions that are always safe to read as UTF-8 text. */
+const TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "md", "json", "yaml", "yml", "xml", "html", "htm", "css", "scss", "sass", "less",
+  "js", "jsx", "mjs", "cjs", "ts", "tsx", "py", "pyw", "rb", "go", "rs", "java", "kt", "kts",
+  "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx", "cs", "php", "swift", "scala", "sh",
+  "bash", "zsh", "fish", "ps1", "bat", "cmd", "sql", "graphql", "gql", "proto", "toml",
+  "ini", "cfg", "conf", "env", "prisma", "vue", "svelte", "r", "lua", "dart", "elm",
+  "ex", "exs", "hs", "erl", "hrl", "ml", "mli", "nim", "zig", "v", "csv", "tsv", "log",
+  "rest", "text", "diff", "patch",
+]);
+
+function isTextFile(filename: string): boolean {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  return TEXT_FILE_EXTENSIONS.has(ext);
 }
 
 /** Build reply context (prefix text + attachments) from a replied-to message. */
@@ -123,8 +162,10 @@ export function createBot(messageHandler: MessageHandler): Bot {
     )
   );
   bot.command("cancel", async (ctx) => {
-    messageHandler.cancelChannel(`telegram:${ctx.chat.id}`);
-    await ctx.reply("⛔ Cancelled.");
+    const channelKey = `telegram:${ctx.chat.id}`;
+    const activeWs = getActiveWorkspace(channelKey);
+    messageHandler.cancelChannel(channelKey, activeWs);
+    await ctx.reply(`⛔ Cancelled (${activeWs}).`);
   });
   bot.command("model", async (ctx) => {
     const arg = ctx.match?.trim();
@@ -318,7 +359,21 @@ export function createBot(messageHandler: MessageHandler): Bot {
     const { prefix: replyPrefix, attachments: replyAttachments } = await buildReplyContext(ctx.message.reply_to_message);
 
     const caption = ctx.message.caption ?? "";
-    const prompt = replyPrefix + (caption || "[Image attached]");
+    const prompt = replyPrefix + (caption || "请描述这张图片。");
+
+    // Convert downloaded photo to base64 blob for the model
+    const allAttachments: Attachment[] = [];
+    if (photoPath) {
+      try {
+        const buffer = readFileSync(photoPath);
+        const base64 = buffer.toString("base64");
+        allAttachments.push({ type: "blob", data: base64, mimeType: "image/jpeg", displayName: "photo.jpg" });
+      } catch (err) {
+        console.error(`[telegram] Failed to read photo for blob attachment: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    // Replied-to image/file attachments come after the primary photo
+    allAttachments.push(...replyAttachments);
 
     // Show "typing..." indicator
     let typingInterval: ReturnType<typeof setInterval> | undefined;
@@ -339,6 +394,11 @@ export function createBot(messageHandler: MessageHandler): Bot {
 
     const channelKey = `telegram:${chatId}`;
     const result = route(prompt, { senderId: channelKey, channelKey });
+
+    // Attach the photo blob (and any reply attachments) to the prompt
+    if (result.type === "prompt" && allAttachments.length > 0) {
+      result.attachments = allAttachments;
+    }
 
     let sentLength = 0;
     let earlySendTimer: ReturnType<typeof setTimeout> | undefined;
@@ -382,6 +442,123 @@ export function createBot(messageHandler: MessageHandler): Bot {
         }
         void cleanupAttachments(replyAttachments);
         if (photoPath) void unlink(photoPath).catch(() => {});
+        return;
+      }
+      if (!text) return;
+
+      if (earlySendTimer) clearTimeout(earlySendTimer);
+      if (/[。.]\s*$/.test(text)) {
+        earlySendTimer = setTimeout(() => {
+          const unsent = text.slice(sentLength);
+          if (unsent) {
+            void sendChunks(unsent);
+            sentLength = text.length;
+          }
+        }, 5000);
+      }
+    });
+  });
+
+  // Handle document messages (text-based files only)
+  bot.on("message:document", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const userMessageId = ctx.message.message_id;
+    const replyParams = { message_id: userMessageId };
+
+    const doc = ctx.message.document;
+    const filename = doc.file_name || "document";
+    const fileId = doc.file_id;
+
+    // Check if it's a text file
+    if (!isTextFile(filename)) {
+      await ctx.reply(
+        `_(暂不支持此文件类型。目前支持: txt, md, json, py, ts, js, go, rs, ... 等文本文件。)_`,
+        { reply_parameters: replyParams }
+      ).catch(() => {});
+      return;
+    }
+
+    // Download the document
+    const docResult = await downloadTelegramDocument(fileId, "doc");
+    if (!docResult) {
+      await ctx.reply("_(无法下载文件，请重试。)_").catch(() => {});
+      return;
+    }
+
+    let fileContent: string;
+    try {
+      fileContent = readFileSync(docResult.path, "utf-8");
+    } catch {
+      void unlink(docResult.path).catch(() => {});
+      await ctx.reply("_(文件无法以文本方式读取。)_").catch(() => {});
+      return;
+    }
+    void unlink(docResult.path).catch(() => {});
+
+    const caption = ctx.message.caption ?? "";
+    const prompt = caption
+      ? `${caption}\n\n[文件: ${filename}]\n\n${fileContent}`
+      : `[文件: ${filename}]\n\n${fileContent}`;
+
+    // Build reply context
+    const { prefix: replyPrefix } = await buildReplyContext(ctx.message.reply_to_message);
+    const finalPrompt = replyPrefix + prompt;
+
+    // Show "typing..." indicator
+    let typingInterval: ReturnType<typeof setInterval> | undefined;
+    const startTyping = () => {
+      void ctx.replyWithChatAction("typing").catch(() => {});
+      typingInterval = setInterval(() => {
+        void ctx.replyWithChatAction("typing").catch(() => {});
+      }, 4000);
+    };
+    const stopTyping = () => {
+      if (typingInterval) { clearInterval(typingInterval); typingInterval = undefined; }
+    };
+
+    startTyping();
+
+    const channelKey = `telegram:${chatId}`;
+    const routed = route(finalPrompt, { senderId: channelKey, channelKey });
+
+    let sentLength = 0;
+    let earlySendTimer: ReturnType<typeof setTimeout> | undefined;
+    let isFirstChunk = true;
+
+    const sendChunks = async (text: string) => {
+      const formatted = toTelegramMarkdown(text);
+      const chunks = chunkMessage(formatted);
+      const fallbackChunks = chunkMessage(text);
+      const sendChunk = async (chunk: string, fallback: string, useReply: boolean) => {
+        const opts = useReply
+          ? { parse_mode: "MarkdownV2" as const, reply_parameters: replyParams }
+          : { parse_mode: "MarkdownV2" as const };
+        await ctx.reply(chunk, opts).catch(
+          () => ctx.reply(fallback, useReply ? { reply_parameters: replyParams } : {})
+        );
+      };
+      try {
+        for (let i = 0; i < chunks.length; i++) {
+          await sendChunk(chunks[i], fallbackChunks[i] ?? chunks[i], i === 0 && isFirstChunk);
+        }
+      } catch {
+        try {
+          for (let i = 0; i < fallbackChunks.length; i++) {
+            await ctx.reply(fallbackChunks[i], i === 0 && isFirstChunk ? { reply_parameters: replyParams } : {});
+          }
+        } catch { /* ignore */ }
+      }
+      isFirstChunk = false;
+    };
+
+    messageHandler.handle(routed, channelKey, (text: string, done: boolean) => {
+      if (done) {
+        stopTyping();
+        if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
+        const remaining = text.slice(sentLength);
+        if (remaining.length > 0) {
+          void sendChunks(remaining);
+        }
         return;
       }
       if (!text) return;
