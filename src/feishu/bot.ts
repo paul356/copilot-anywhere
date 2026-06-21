@@ -13,6 +13,18 @@ import { join } from "path";
 let client: Lark.Client | undefined;
 let wsClient: Lark.WSClient | undefined;
 let eventDispatcher: Lark.EventDispatcher | undefined;
+// Saved message handler so we can recreate dispatcher/wsClient on restart
+let savedMessageHandler: MessageHandler | undefined;
+
+// Health-check watchdog state
+let healthTimer: ReturnType<typeof setInterval> | undefined;
+let consecutiveHealthFailures = 0;
+let isRestarting = false;
+let restartCount = 0;
+let lastRestartAt = 0;
+const HEALTH_CHECK_INTERVAL_MS = 5 * 1000; // 5s for quick network change detection
+const HEALTH_FAILURE_THRESHOLD = 2; // restart after 2 consecutive failures (10s total)
+const RESTART_BACKOFF_BASE_MS = 5 * 1000; // base backoff between restart attempts
 
 interface PendingQuestion {
   messageId: string;
@@ -281,9 +293,26 @@ async function drainHeldMessages(openId: string, wsName: string, messageHandler:
     try {
       await processMessage(routed, openId, messageId, chatId, messageHandler, resetThinkingTimer, wsName);
     } catch (err) {
+      // Match the main dispatcher's cleanup: release stuck ask_user state
+      // and any held messages for this user/workspace.
+      clearThinkingTimer(openId, wsName);
+      clearPending(openId, wsName);
+      heldMessages.delete(openId);
+
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error("[feishu] drainHeldMessages error:", err);
-      void sendReply(messageId, chatId, `❌ 处理挂起消息时发生错误：${errMsg}`);
+
+      let userMessage: string;
+      if (/timed out|hard limit/i.test(errMsg)) {
+        userMessage =
+          "⏱️ 上一个请求运行超过 1 小时未完成，已取消。\n" +
+          "请重新发送您要处理的消息。";
+      } else if (/cancelled|abort/i.test(errMsg)) {
+        userMessage = "⛔ 当前请求已取消。";
+      } else {
+        userMessage = `❌ 处理挂起消息时发生错误：${errMsg}`;
+      }
+      void sendReply(messageId, chatId, userMessage);
     } finally {
       clearThinkingTimer(openId, wsName);
     }
@@ -579,6 +608,9 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
     domain,
     loggerLevel: Lark.LoggerLevel.warn,
   });
+
+  // remember handler for possible restarts
+  savedMessageHandler = messageHandler;
 
   const dispatcher = new Lark.EventDispatcher({}).register({
     "im.message.receive_v1": async (data: unknown) => {
@@ -885,9 +917,27 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         );
       } catch (err) {
         clearThinkingTimer(senderOpenId, activeWs);
+        // Release any stuck ask_user state from the failed prompt so the
+        // user's NEXT message is treated as a fresh prompt instead of being
+        // silently consumed as an answer to an abandoned question.
+        clearPending(senderOpenId, activeWs);
+        heldMessages.delete(senderOpenId);
+
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error("[feishu] processMessage error:", err);
-        void sendReply(event.message.message_id, event.message.chat_id, `❌ 处理消息时发生错误：${errMsg}`);
+
+        let userMessage: string;
+        if (/timed out|hard limit/i.test(errMsg)) {
+          userMessage =
+            "⏱️ 上一个请求运行超过 1 小时未完成，已取消。\n" +
+            "下一条消息将作为新会话开始（之前的上下文已丢弃）。\n" +
+            "如有重要内容请重新发送。";
+        } else if (/cancelled|abort/i.test(errMsg)) {
+          userMessage = "⛔ 当前请求已取消。";
+        } else {
+          userMessage = `❌ 处理消息时发生错误：${errMsg}`;
+        }
+        void sendReply(event.message.message_id, event.message.chat_id, userMessage);
         return;
       } finally {
         // Cancel any remaining thinking timer for this sender + workspace
@@ -943,6 +993,99 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
   return { client, wsClient };
 }
 
+async function doHealthCheckOnce(): Promise<boolean> {
+  if (!client || !wsClient) return false;
+  try {
+    // Primary check: WS connection state via getReconnectInfo().
+    // The SDK sets nextConnectTime when it is in a reconnecting state
+    // (i.e. network/IP changed and it cannot reach the server).
+    const anyWs = wsClient as any;
+    if (typeof anyWs.getReconnectInfo === "function") {
+      const info = anyWs.getReconnectInfo();
+      // nextConnectTime > now means SDK is between reconnect attempts → unhealthy
+      if (info?.nextConnectTime && info.nextConnectTime > Date.now()) {
+        return false;
+      }
+      // lastConnectTime == 0 means WS has never connected successfully → unhealthy
+      if (!info?.lastConnectTime) {
+        return false;
+      }
+      return true;
+    }
+
+    // Fallback: try to refresh the tenant access token. Note that the
+    // TokenManager swallows network errors and returns undefined, so this
+    // only catches auth-related issues. We rely on getReconnectInfo() above
+    // for primary detection.
+    const tokenManager = (client as any).tokenManager;
+    if (tokenManager?.getTenantAccessToken) {
+      const result = await tokenManager.getTenantAccessToken();
+      return result !== undefined && result !== null;
+    }
+
+    // If we can't determine, assume healthy
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function startHealthWatchdog(): void {
+  if (healthTimer) return;
+  healthTimer = setInterval(async () => {
+    try {
+      const healthy = await doHealthCheckOnce();
+      if (healthy) {
+        consecutiveHealthFailures = 0;
+        return;
+      }
+      consecutiveHealthFailures += 1;
+      console.warn(`[feishu] Health check failed (${consecutiveHealthFailures}/${HEALTH_FAILURE_THRESHOLD})`);
+      if (consecutiveHealthFailures >= HEALTH_FAILURE_THRESHOLD) {
+        if (isRestarting) return;
+        // Apply growing backoff between restart attempts to prevent tight loops
+        // if the network is still down. 5s, 10s, 20s, capped at 60s.
+        const backoffMs = Math.min(
+          RESTART_BACKOFF_BASE_MS * Math.pow(2, Math.min(restartCount, 3)),
+          60 * 1000,
+        );
+        if (Date.now() - lastRestartAt < backoffMs) {
+          console.warn(`[feishu] Restart suppressed (backoff ${backoffMs}ms, attempt #${restartCount + 1})`);
+          return;
+        }
+        isRestarting = true;
+        lastRestartAt = Date.now();
+        try {
+          console.warn(`[feishu] Network connectivity lost — restarting Feishu WS client (attempt #${restartCount + 1})...`);
+          await stopBot();
+          // Recreate bot state using saved handler if available
+          if (savedMessageHandler) {
+            createBot(savedMessageHandler);
+          }
+          await startBot();
+          consecutiveHealthFailures = 0;
+          restartCount += 1;
+          console.log("[feishu] Feishu WS client reconnected successfully");
+        } catch (err) {
+          console.error("[feishu] Failed to restart Feishu bot:", err);
+        } finally {
+          isRestarting = false;
+        }
+      }
+    } catch (err) {
+      console.error("[feishu] Healthwatcher error:", err);
+    }
+  }, HEALTH_CHECK_INTERVAL_MS);
+}
+
+function stopHealthWatchdog(): void {
+  if (!healthTimer) return;
+  clearInterval(healthTimer);
+  healthTimer = undefined;
+  consecutiveHealthFailures = 0;
+  restartCount = 0;
+  lastRestartAt = 0;
+}
 export async function startBot(): Promise<void> {
   if (!wsClient || !eventDispatcher) throw new Error("Feishu bot not created");
   if (config.feishuAuthorizedOpenId) {
@@ -954,6 +1097,8 @@ export async function startBot(): Promise<void> {
   try {
     wsClient.start({ eventDispatcher });
     console.log("[max] Feishu websocket loop started; waiting for incoming events");
+    // Start health-check watchdog to detect unrecoverable WS state
+    try { startHealthWatchdog(); } catch (e) { console.warn('[feishu] Failed to start health watchdog:', e); }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     if (/invalid|unauthorized|app_id|secret/i.test(message)) {
@@ -968,6 +1113,9 @@ export async function startBot(): Promise<void> {
 
 export async function stopBot(): Promise<void> {
   // Lark WSClient does not expose a clean stop in all versions; best-effort.
+  // Stop watchdog first
+  try { stopHealthWatchdog(); } catch (e) { /* best effort */ }
+
   const anyClient = wsClient as unknown as { stop?: () => void; close?: () => void };
   try {
     anyClient.stop?.();

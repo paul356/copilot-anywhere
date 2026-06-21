@@ -8,7 +8,14 @@
  *
  * Per-channel serial queues: only one in-flight message per channel at a time.
  * Retry on recoverable errors (3x, exponential backoff).
- * Timeout prevents hangs (default 10 min).
+ *
+ * Timeout policy:
+ *   - LLM processing: 1 hour hard cap (resets on every session event).
+ *   - ask_user waiting: NO timeout — user can come back arbitrarily later.
+ *     The hard timer is paused while pendingInput holds a question and
+ *     resumed once the user answers.
+ *   - Cleanup runs in a single try/finally so cancelled / timed-out /
+ *     errored prompts all release session subscriptions and map entries.
  */
 
 import { CopilotSession } from "@github/copilot-sdk";
@@ -16,6 +23,7 @@ import { RoutedMessage, executeMaxCommand, type Attachment } from "./command-rou
 import { CLIProcess } from "./cli-process.js";
 import { getActiveWorkspace } from "./store/db.js";
 import { getClient } from "./copilot/client.js";
+import { invalidateSession } from "./copilot-client.js";
 import { config } from "./config.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -40,11 +48,13 @@ export interface QueuedMessage {
 
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const LLM_HARD_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour cap on LLM processing (per attempt)
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (legacy — no longer used for activity)
 const RECOVERABLE_PATTERNS = /connection|EADDR|ECONN|ETIMEDOUT|ENOTFOUND|socket hang up|pipe/i;
-const FATAL_TIMEOUT_PATTERNS = /message processing timed out|no activity/i;
+const FATAL_TIMEOUT_PATTERNS = /message processing timed out|no activity|LLM processing timed out/i;
 const CLI_COMMAND_TIMEOUT_MS = 15_000; // 15s for CLI slash command TUI output
 const CLI_COMMAND_SETTLE_MS = 1_500;   // wait 1.5s for TUI to finish rendering
+const ASK_USER_FALLBACK_ANSWER = "(Previous question was abandoned due to timeout. Please re-ask if needed.)";
 
 function isRecoverable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -129,27 +139,6 @@ async function filterAttachments(
   }
 
   return { filtered: kept, warning };
-}
-
-/**
- * Creates a promise that rejects after `ms` milliseconds of inactivity.
- * Call `reset()` on every activity signal (session event, text delta, etc.).
- * Call `clear()` when the operation completes normally to cancel the timer.
- */
-function createActivityTimeout(ms: number): {
-  promise: Promise<never>;
-  reset: () => void;
-  clear: () => void;
-} {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let rejectPromise: ((err: Error) => void) | undefined;
-  const promise = new Promise<never>((_, reject) => { rejectPromise = reject; });
-  const reset = () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => rejectPromise!(new Error("Copilot is not responding (no activity for 3 minutes)")), ms);
-  };
-  const clear = () => { if (timer) clearTimeout(timer); };
-  return { promise, reset, clear };
 }
 
 /** Strip ANSI escape codes and cursor movement sequences from PTY output */
@@ -462,9 +451,39 @@ export class MessageHandler {
   private sessionChannels = new Map<string, string>();
   /** Composite-key pending user-input resolvers */
   private pendingInput = new Map<string, { resolve: (answer: string) => void }>();
+  /** Composite-key hard-timer handles (reset on every session event, paused during ask_user) */
+  private hardTimers = new Map<string, NodeJS.Timeout>();
+  /** Composite-key hard-timer reject callbacks (paired with hardTimers) */
+  private hardTimerRejects = new Map<string, (err: Error) => void>();
 
   constructor(options: MessageHandlerOptions) {
     this.options = options;
+  }
+
+  /**
+   * Arm (or re-arm) the 1-hour hard timer for `qKey`. Pauses itself while a
+   * pending ask_user is waiting on this qKey — so user response time is
+   * unbounded. Called on every session event from processOne.
+   */
+  private armHardTimer(qKey: string): void {
+    this.clearHardTimer(qKey);
+    // No timeout while waiting for user input.
+    if (this.pendingInput.has(qKey)) return;
+    const reject = this.hardTimerRejects.get(qKey);
+    if (!reject) return; // no prompt registered a reject for this qKey
+    const t = setTimeout(() => {
+      this.hardTimers.delete(qKey);
+      this.hardTimerRejects.delete(qKey);
+      reject(new Error("LLM processing timed out (1 hour hard limit)"));
+    }, LLM_HARD_TIMEOUT_MS);
+    this.hardTimers.set(qKey, t);
+  }
+
+  /** Clear the hard timer for `qKey` if one is set. Does NOT touch the reject. */
+  private clearHardTimer(qKey: string): void {
+    const t = this.hardTimers.get(qKey);
+    if (t) clearTimeout(t);
+    this.hardTimers.delete(qKey);
   }
 
   /** Send a routed message on a channel. Returns when processing completes. */
@@ -532,6 +551,9 @@ export class MessageHandler {
         for (const item of queue) item.reject(new Error("Cancelled"));
         this.channelQueues.delete(key);
       }
+      // Tear down the hard timer / reject pair so it can't fire after cancel.
+      this.clearHardTimer(key);
+      this.hardTimerRejects.delete(key);
     }
   }
 
@@ -544,6 +566,11 @@ export class MessageHandler {
       this.channelQueues.delete(key);
     }
     this.channelProcessing.clear();
+    // Tear down every outstanding hard timer.
+    for (const key of Array.from(this.hardTimers.keys())) {
+      this.clearHardTimer(key);
+      this.hardTimerRejects.delete(key);
+    }
   }
 
   // ── User Input (ask_user) ────────────────────────────────────
@@ -578,6 +605,9 @@ export class MessageHandler {
     // channel cancels the pending ask_user request.
     return new Promise<string>((resolve) => {
       this.pendingInput.set(compositeKey, { resolve });
+      // Pause the hard timer — ask_user has no timeout. The timer is
+      // re-armed by answerUserInput() once the user responds.
+      this.clearHardTimer(compositeKey);
     });
   }
 
@@ -591,6 +621,9 @@ export class MessageHandler {
     if (!pending) return false;
     this.pendingInput.delete(compositeKey);
     pending.resolve(answer);
+    // Resume the hard timer now that the user has answered. The next
+    // session event from the LLM continuing the turn will re-arm it.
+    this.armHardTimer(compositeKey);
     return true;
   }
 
@@ -691,57 +724,94 @@ export class MessageHandler {
           });
 
           const t0 = Date.now();
-          const INACTIVITY_TIMEOUT_MS = 3 * 60 * 1000; // 3 min no activity → timeout
-          const activity = createActivityTimeout(INACTIVITY_TIMEOUT_MS);
-          activity.reset();
-          const unsubActivity = session.on(() => activity.reset());
-
-          const fullText = await Promise.race([
-            new Promise<string>((resolve, reject) => {
-            let fullText = "";
-            const unsubDelta = session.on("assistant.message_delta", (event) => {
-              const chunk = event.data.deltaContent;
-              if (chunk) {
-                fullText += chunk;
-                callback(fullText, false);
-              }
+          // Hard timer that resets on every session event but pauses while
+          // the LLM is blocked on ask_user waiting for the user. There is
+          // no "inactivity" timeout — only this 1-hour hard cap.
+          let hardTimerWon = false;
+          const hardTimerPromise = new Promise<never>((_, reject) => {
+            this.hardTimerRejects.set(qKey, (err) => {
+              hardTimerWon = true;
+              reject(err);
             });
-            const unsubIdle = session.on("session.idle", () => {
-              unsubDelta();
-              unsubIdle();
-              unsubDebug();
-              unsubActivity();
-              activity.clear();
+          });
+          this.armHardTimer(qKey);
+          const unsubReset = session.on(() => this.armHardTimer(qKey));
+
+          // Collect every subscription we register so a single try/finally
+          // can unsubscribe all of them, regardless of which side of the
+          // race wins (idle / send-error / hard-timer / future errors).
+          const cleanupFns: Array<() => void> = [unsubReset, unsubDebug];
+
+          const fullText = await (async () => {
+            try {
+              return await Promise.race([
+                new Promise<string>((resolve, reject) => {
+                  let fullText = "";
+                  const unsubDelta = session.on("assistant.message_delta", (event) => {
+                    const chunk = event.data.deltaContent;
+                    if (chunk) {
+                      fullText += chunk;
+                      callback(fullText, false);
+                    }
+                  });
+                  cleanupFns.push(unsubDelta);
+
+                  const unsubIdle = session.on("session.idle", () => {
+                    if (sessionError) {
+                      reject(new Error(sessionError));
+                      return;
+                    }
+                    console.log(`[message-handler] Prompt response (${Date.now() - t0}ms, ${fullText.length} chars): ${fullText.slice(0, 300)}`);
+                    callback("", true);
+                    resolve(fullText);
+                  });
+                  cleanupFns.push(unsubIdle);
+
+                  const sendPayload: { prompt: string; attachments?: Attachment[] } = { prompt: effectivePrompt };
+                  if (safeAttachments.length > 0) {
+                    sendPayload.attachments = safeAttachments;
+                  }
+                  session.send(sendPayload).catch((err: unknown) => {
+                    console.error(`[message-handler] Prompt send failed: ${err instanceof Error ? err.message : String(err)}`);
+                    reject(err instanceof Error ? err : new Error(String(err)));
+                  });
+                }),
+                hardTimerPromise,
+              ]);
+            } finally {
+              // Release every subscription and map entry — success, idle,
+              // send-error, hard-timer, or any future failure all go
+              // through this single block.
+              for (const fn of cleanupFns) {
+                try { fn(); } catch { /* best effort */ }
+              }
+              this.clearHardTimer(qKey);
+              this.hardTimerRejects.delete(qKey);
               this.sessionChannels.delete(session.sessionId);
               this.activeCallbacks.delete(qKey);
-              if (sessionError) {
-                console.error(`[message-handler] Prompt error: ${sessionError}`);
-                reject(new Error(sessionError));
-                return;
-              }
-              console.log(`[message-handler] Prompt response (${Date.now() - t0}ms, ${fullText.length} chars): ${fullText.slice(0, 300)}`);
-              callback("", true);
-              resolve(fullText);
-            });
 
-            const sendPayload: { prompt: string; attachments?: Attachment[] } = { prompt: effectivePrompt };
-            if (safeAttachments.length > 0) {
-              sendPayload.attachments = safeAttachments;
+              // If a stuck ask_user is waiting on this qKey, resolve it
+              // with a fallback so the SDK's onUserInputRequest returns
+              // and the session isn't permanently blocked.
+              const stuck = this.pendingInput.get(qKey);
+              if (stuck) {
+                this.pendingInput.delete(qKey);
+                stuck.resolve(ASK_USER_FALLBACK_ANSWER);
+              }
+
+              // On hard-timer timeout, invalidate the cached Copilot
+              // session so the next prompt in this workspace gets a fresh
+              // one instead of reusing the half-finished turn.
+              if (hardTimerWon) {
+                try {
+                  invalidateSession(workspaceName, workingDir);
+                  console.log(`[message-handler] Hard-timer timeout — invalidated Copilot session for ws=${workspaceName}`);
+                } catch (err) {
+                  console.warn(`[message-handler] Failed to invalidate session after timeout: ${err instanceof Error ? err.message : String(err)}`);
+                }
+              }
             }
-            session.send(sendPayload).catch((err: unknown) => {
-              unsubDelta();
-              unsubIdle();
-              unsubDebug();
-              unsubActivity();
-              activity.clear();
-              this.sessionChannels.delete(session.sessionId);
-              this.activeCallbacks.delete(qKey);
-              console.error(`[message-handler] Prompt send failed: ${err instanceof Error ? err.message : String(err)}`);
-              reject(err instanceof Error ? err : new Error(String(err)));
-            });
-            }),
-            activity.promise,
-          ]);
+          })();
         });
         break;
       }
@@ -787,10 +857,14 @@ export class MessageHandler {
   ): Promise<void> {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const HARD_TIMEOUT_MS = 30 * 60 * 1000; // 30 min safety net; activity timeout handles detection
+        // Outer safety net at the same 1h cap as the inner hard timer.
+        // Belt-and-suspenders: the inner one resets on session events and
+        // pauses during ask_user; this one is a wall-clock fallback in case
+        // the inner timer doesn't fire for any reason.
+        const HARD_TIMEOUT_MS = LLM_HARD_TIMEOUT_MS;
         await Promise.race([
           fn(),
-          sleep(HARD_TIMEOUT_MS).then(() => { throw new Error("Message processing timed out (30 min hard limit)"); }),
+          sleep(HARD_TIMEOUT_MS).then(() => { throw new Error("Message processing timed out (1 hour hard limit)"); }),
         ]);
         return;
       } catch (err) {
