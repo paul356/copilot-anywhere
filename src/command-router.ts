@@ -145,7 +145,7 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
         "  /max:ws list                 List all workspaces",
         "  /max:restart                 Restart the daemon",
         "  /max:skip                    Skip the current question",
-        "  /max:cancel                  Cancel the current operation",
+        "  /max:cancel                  Cancel queued messages, or in-flight if queue is empty",
         "  /max:status                  Show daemon status",
         "  /max:help                    Show this help",
         "",

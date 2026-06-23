@@ -299,13 +299,18 @@ async function drainHeldMessages(openId: string, wsName: string, messageHandler:
       clearPending(openId, wsName);
       heldMessages.delete(openId);
 
+      // Silent cancel: /max:cancel already replied with a summary upstream.
+      if (err && typeof err === "object" && (err as { silentCancel?: boolean }).silentCancel) {
+        return;
+      }
+
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error("[feishu] drainHeldMessages error:", err);
 
       let userMessage: string;
-      if (/timed out|hard limit/i.test(errMsg)) {
+      if (/LLM not responding|5 min/i.test(errMsg)) {
         userMessage =
-          "⏱️ 上一个请求运行超过 1 小时未完成，已取消。\n" +
+          "⏱️ LLM 5 分钟内无响应，已取消。\n" +
           "请重新发送您要处理的消息。";
       } else if (/cancelled|abort/i.test(errMsg)) {
         userMessage = "⛔ 当前请求已取消。";
@@ -775,18 +780,25 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
       }
 
       // ── /max:cancel ────────────────────────────────────────
+      // Smart cancel: if there are queued messages, cancel ONLY the queue
+      // (leave the in-flight request running). If the queue is empty,
+      // cancel the in-flight request.
       if (text.trim() === "/max:cancel") {
         const channelKey = `feishu:${senderOpenId}`;
         const activeWs = getActiveWorkspace(channelKey);
         clearPending(senderOpenId, activeWs);
         clearThinkingTimer(senderOpenId, activeWs);
         heldMessages.delete(senderOpenId); // clear all held for this user
-        messageHandler.cancelChannel(channelKey, activeWs);
-        await sendChunkedReply(
-          event.message.message_id,
-          event.message.chat_id,
-          `⛔ 已取消当前操作 (${activeWs})。\n⛔ Current operation cancelled (${activeWs}).`
-        );
+        const result = messageHandler.cancelChannel(channelKey, activeWs);
+        let replyText: string;
+        if (!result) {
+          replyText = `ℹ️ 当前没有正在处理或排队的消息 (${activeWs})。`;
+        } else if (result.cancelledQueued > 0) {
+          replyText = `⛔ 已取消队列中 ${result.cancelledQueued} 条消息 (${activeWs})。当前请求继续运行。`;
+        } else {
+          replyText = `⛔ 已取消当前正在处理的请求 (${activeWs})。`;
+        }
+        await sendChunkedReply(event.message.message_id, event.message.chat_id, replyText);
         return;
       }
 
@@ -897,7 +909,15 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
       if (routed.type === "prompt" || routed.type === "cli-command") {
         if (messageHandler.isChannelBusy(channelKey, activeWs)) {
-          void sendReply(event.message.message_id, event.message.chat_id, "⏳ 前一个请求正在处理中，已加入队列。");
+          const queueLen = messageHandler.getQueueLength(channelKey, activeWs);
+          const queueNote = queueLen > 0
+            ? `\n📋 队列中还有 ${queueLen} 条消息等待处理。`
+            : "";
+          void sendReply(
+            event.message.message_id,
+            event.message.chat_id,
+            `⏳ 前一个请求正在处理中，已加入队列。${queueNote}\n💡 发送 /max:cancel 可取消队列中的消息或当前正在处理的请求。`
+          );
         } else {
           resetThinkingTimer();
         }
@@ -923,13 +943,19 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         clearPending(senderOpenId, activeWs);
         heldMessages.delete(senderOpenId);
 
+        // Silent cancel: /max:cancel (or /cancel) already replied with a
+        // summary. Don't send a duplicate "当前请求已取消" here.
+        if (err && typeof err === "object" && (err as { silentCancel?: boolean }).silentCancel) {
+          return;
+        }
+
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error("[feishu] processMessage error:", err);
 
         let userMessage: string;
-        if (/timed out|hard limit/i.test(errMsg)) {
+        if (/LLM not responding|5 min/i.test(errMsg)) {
           userMessage =
-            "⏱️ 上一个请求运行超过 1 小时未完成，已取消。\n" +
+            "⏱️ LLM 5 分钟内无响应，已取消。\n" +
             "下一条消息将作为新会话开始（之前的上下文已丢弃）。\n" +
             "如有重要内容请重新发送。";
         } else if (/cancelled|abort/i.test(errMsg)) {

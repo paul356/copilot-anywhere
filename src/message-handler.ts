@@ -48,10 +48,10 @@ export interface QueuedMessage {
 
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
-const LLM_HARD_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour cap on LLM processing (per attempt)
+const LLM_HARD_TIMEOUT_MS = 5 * 60 * 1000; // 5 min cap on LLM call-to-response time
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (legacy — no longer used for activity)
 const RECOVERABLE_PATTERNS = /connection|EADDR|ECONN|ETIMEDOUT|ENOTFOUND|socket hang up|pipe/i;
-const FATAL_TIMEOUT_PATTERNS = /message processing timed out|no activity|LLM processing timed out/i;
+const FATAL_TIMEOUT_PATTERNS = /LLM not responding|LLM call timed out|no activity/i;
 const CLI_COMMAND_TIMEOUT_MS = 15_000; // 15s for CLI slash command TUI output
 const CLI_COMMAND_SETTLE_MS = 1_500;   // wait 1.5s for TUI to finish rendering
 const ASK_USER_FALLBACK_ANSWER = "(Previous question was abandoned due to timeout. Please re-ask if needed.)";
@@ -474,7 +474,7 @@ export class MessageHandler {
     const t = setTimeout(() => {
       this.hardTimers.delete(qKey);
       this.hardTimerRejects.delete(qKey);
-      reject(new Error("LLM processing timed out (1 hour hard limit)"));
+      reject(new Error("LLM not responding (5 min timeout)"));
     }, LLM_HARD_TIMEOUT_MS);
     this.hardTimers.set(qKey, t);
   }
@@ -529,8 +529,24 @@ export class MessageHandler {
     return anyChannelMatch(this.channelProcessing, channelKey);
   }
 
-  /** Cancel all in-flight and queued messages for a channel (optionally scoped to a workspace). */
-  cancelChannel(channelId: string, wsName?: string): void {
+  /** Returns the number of queued (waiting) messages for a channel+workspace composite key.
+   *  Excludes the message currently being processed (channelActive). */
+  getQueueLength(channelKey: string, wsName: string): number {
+    return this.channelQueues.get(wsKey(channelKey, wsName))?.length ?? 0;
+  }
+
+  /**
+   * Smart cancel: if there are queued messages waiting, cancel ONLY the queue
+   * (the in-flight request keeps running). If the queue is empty, cancel the
+   * in-flight request. Returns a summary of what was cancelled, or null if
+   * nothing matched.
+   *
+   * Rejected items get an Error with `silentCancel = true` so callers can
+   * tell the difference between an intentional user-initiated cancel
+   * (handled with a single reply by /max:cancel) and an unexpected
+   * cancellation that should still surface to the user.
+   */
+  cancelChannel(channelId: string, wsName?: string): { cancelledQueued: number; cancelledActive: boolean } | null {
     const prefix = wsName ? wsKey(channelId, wsName) : `${channelId}:`;
     const match = (key: string) => wsName ? key === prefix : key.startsWith(prefix);
 
@@ -539,22 +555,40 @@ export class MessageHandler {
     for (const key of this.channelQueues.keys()) { if (match(key)) targetKeys.push(key); }
     for (const key of this.channelActive.keys()) { if (match(key) && !targetKeys.includes(key)) targetKeys.push(key); }
 
+    if (targetKeys.length === 0) return null;
+
+    let totalQueued = 0;
+    let anyActiveCancelled = false;
+    const makeCancelledError = () => {
+      const e = new Error("Cancelled");
+      (e as Error & { silentCancel?: boolean }).silentCancel = true;
+      return e;
+    };
+
     for (const key of targetKeys) {
+      const queue = this.channelQueues.get(key);
+      if (queue && queue.length > 0) {
+        // Queue non-empty: cancel queued items only, leave the in-flight request running.
+        totalQueued += queue.length;
+        for (const item of queue) item.reject(makeCancelledError());
+        this.channelQueues.delete(key);
+        // Do NOT touch channelCancels / channelActive — in-flight keeps going.
+        continue;
+      }
+      // Queue empty (or absent): cancel the in-flight request.
       this.channelCancels.add(key);
       const active = this.channelActive.get(key);
       if (active) {
-        active.reject(new Error("Cancelled"));
+        active.reject(makeCancelledError());
         this.channelActive.delete(key);
-      }
-      const queue = this.channelQueues.get(key);
-      if (queue) {
-        for (const item of queue) item.reject(new Error("Cancelled"));
-        this.channelQueues.delete(key);
+        anyActiveCancelled = true;
       }
       // Tear down the hard timer / reject pair so it can't fire after cancel.
       this.clearHardTimer(key);
       this.hardTimerRejects.delete(key);
     }
+
+    return { cancelledQueued: totalQueued, cancelledActive: anyActiveCancelled };
   }
 
   /** Flush all queues (e.g., on shutdown) */
@@ -855,17 +889,12 @@ export class MessageHandler {
     wsName: string,
     fn: () => Promise<void>,
   ): Promise<void> {
+    // The actual call-to-response timeout lives inside `fn()` via the
+    // inner hard timer (armHardTimer → hardTimerPromise). We do NOT add
+    // an outer wall-clock race here — that's the band-aid we removed.
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // Outer safety net at the same 1h cap as the inner hard timer.
-        // Belt-and-suspenders: the inner one resets on session events and
-        // pauses during ask_user; this one is a wall-clock fallback in case
-        // the inner timer doesn't fire for any reason.
-        const HARD_TIMEOUT_MS = LLM_HARD_TIMEOUT_MS;
-        await Promise.race([
-          fn(),
-          sleep(HARD_TIMEOUT_MS).then(() => { throw new Error("Message processing timed out (1 hour hard limit)"); }),
-        ]);
+        await fn();
         return;
       } catch (err) {
         // Don't retry cancelled messages

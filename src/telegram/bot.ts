@@ -164,8 +164,16 @@ export function createBot(messageHandler: MessageHandler): Bot {
   bot.command("cancel", async (ctx) => {
     const channelKey = `telegram:${ctx.chat.id}`;
     const activeWs = getActiveWorkspace(channelKey);
-    messageHandler.cancelChannel(channelKey, activeWs);
-    await ctx.reply(`⛔ Cancelled (${activeWs}).`);
+    const result = messageHandler.cancelChannel(channelKey, activeWs);
+    let replyText: string;
+    if (!result) {
+      replyText = `ℹ️ No active or queued messages (${activeWs}).`;
+    } else if (result.cancelledQueued > 0) {
+      replyText = `⛔ Cancelled ${result.cancelledQueued} queued message(s) (${activeWs}). Current request keeps running.`;
+    } else {
+      replyText = `⛔ Cancelled in-flight request (${activeWs}).`;
+    }
+    await ctx.reply(replyText);
   });
   bot.command("model", async (ctx) => {
     const arg = ctx.match?.trim();
