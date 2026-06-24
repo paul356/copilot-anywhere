@@ -668,6 +668,11 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
       // v1: handle plain text, image, and text-based file messages.
       if (event.message.message_type !== "text" && event.message.message_type !== "image" && event.message.message_type !== "file") {
+        console.warn(
+          `[feishu] Unsupported message_type=${event.message.message_type} ` +
+          `message_id=${event.message.message_id} ` +
+          `content=${event.message.content.slice(0, 500)}`
+        );
         await sendChunkedReply(
           event.message.message_id,
           event.message.chat_id,

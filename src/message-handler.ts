@@ -502,6 +502,9 @@ export class MessageHandler {
         senderId: channelKey,
         activeWorkspace: wsName,
         channelKey,
+      }).catch((err) => {
+        console.error(`[message-handler] max-command failed: /max:${routed.name} ${routed.args.join(" ")} — ${err instanceof Error ? err.message : String(err)}`);
+        throw err;
       });
       console.log(`[message-handler] max-command result (${result.reply.length} chars): ${result.reply.slice(0, 120)}`);
       callback(result.reply, true);
@@ -624,6 +627,7 @@ export class MessageHandler {
     const callback = compositeKey ? this.activeCallbacks.get(compositeKey) : undefined;
 
     if (!compositeKey || !callback) {
+      console.warn(`[message-handler] handleUserInput: no active channel for session=${sessionId.slice(0, 8)}… question="${question.slice(0, 80)}"`);
       // No active channel — fallback answer so the conversation continues
       const choiceList = choices ? ` (${choices.join(", ")})` : "";
       return `The user cannot be reached right now. Question was: "${question}"${choiceList}`;
@@ -880,6 +884,7 @@ export class MessageHandler {
       }
 
       default:
+        console.error(`[message-handler] Unknown routed message type: ${(routed as any).type}`);
         throw new Error(`Unknown routed message type: ${(routed as any).type}`);
     }
   }
