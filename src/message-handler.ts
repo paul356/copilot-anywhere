@@ -66,6 +66,57 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Build the per-turn workspace tag that Max prepends to assistant replies.
+ *
+ * Returned as `""` when disabled or when no workspace name is known. The tag is
+ * intended for the user, never for the LLM — do NOT splice it into the
+ * messages array or session state.
+ */
+function buildWorkspaceTag(wsName: string | undefined): string {
+  if (!config.workspaceTagEnabled) return "";
+  if (!wsName) return "";
+  return `[ws: ${wsName}]\n`;
+}
+
+/**
+ * Wrap a per-channel reply callback so every assistant reply in this turn
+ * starts with a small `[ws: <name>]` reminder. The tag is re-prepended on
+ * every call (not just the first) because Telegram and Feishu compute
+ * `text.slice(sentLength)` to send only the newly arrived slice — if we
+ * dropped the tag after the first call, subsequent slices would lose it.
+ * For channels that render the full accumulated text on each call (TUI SSE
+ * stream), the user just sees a single tag in the final message because
+ * the channel replaces the prior content.
+ *
+ * `ask_user` JSON envelopes are passed through verbatim (they start with
+ * `{"type":"question"`) — prefixing them would break downstream parsing in
+ * the channels.
+ *
+ * The wrapper is a no-op when the feature is disabled by config.
+ */
+function wrapCallbackWithWorkspaceTag(
+  rawCallback: MessageCallback,
+  wsName: string,
+): MessageCallback {
+  const tag = buildWorkspaceTag(wsName);
+  if (!tag) return rawCallback;
+  return (text: string, done: boolean) => {
+    if (!text) {
+      // Pure "done" signal with no content (e.g. the final session.idle
+      // callback). Pass through untouched.
+      rawCallback(text, done);
+      return;
+    }
+    // ask_user JSON envelopes must reach the channel untouched.
+    if (text.startsWith('{"type":"question"')) {
+      rawCallback(text, done);
+      return;
+    }
+    rawCallback(tag + text, done);
+  };
+}
+
 // ── Model capability check (cached) ───────────────────────────────
 
 /** Cached result of the last model capability query. */
@@ -710,7 +761,11 @@ export class MessageHandler {
   }
 
   private async processOne(item: QueuedMessage, channelId: string, wsName: string): Promise<void> {
-    const { routed, callback } = item;
+    const { routed } = item;
+    // Wrap the channel's callback so every assistant reply (prompt / cli / max
+    // command) carries the per-turn workspace tag. The wrapper is a no-op when
+    // disabled by config.
+    const callback = wrapCallbackWithWorkspaceTag(item.callback, wsName);
     const qKey = wsKey(channelId, wsName);
 
     switch (routed.type) {

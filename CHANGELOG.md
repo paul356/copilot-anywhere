@@ -2,6 +2,11 @@
 
 All notable changes to Max are documented here.
 
+## [Unreleased]
+
+### Added
+- Every assistant reply now carries a small `[ws: <name>]` tag at the top so the user can tell which workspace replied when running multiple workspaces in parallel. The tag is rendered for the user only — it never enters the chat history or the LLM context. Set `WORKSPACE_TAG_ENABLED=0` in `~/.max/.env` to disable.
+
 ## [1.5.2] — 2026-04-24
 
 ### Bug fixes

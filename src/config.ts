@@ -80,6 +80,15 @@ export const config = {
   get selfEditEnabled(): boolean {
     return process.env.MAX_SELF_EDIT === "1";
   },
+  /**
+   * When true, Max prefixes every assistant reply (across all channels) with
+   * a small `[ws: <name>]` tag so the user can tell which workspace replied
+   * when running multiple workspaces in parallel. Set to "0" to disable.
+   */
+  get workspaceTagEnabled(): boolean {
+    const v = process.env.WORKSPACE_TAG_ENABLED;
+    return v === undefined ? true : v !== "0" && v.toLowerCase() !== "false";
+  },
 };
 
 /** Update or append an env var in ~/.max/.env */
