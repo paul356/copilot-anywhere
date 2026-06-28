@@ -150,30 +150,6 @@ function setThinkingTimer(openId: string, wsName: string, timer: ReturnType<type
   thinkingTimers.set(thinkingTimerKey(openId, wsName), timer);
 }
 
-/** openId+text → last processed timestamp for content-based dedup.
- *  Prevents the same sender from triggering the same action twice
- *  (e.g. Feishu retrying /max:restart with a new message_id). */
-const recentCommands = new Map<string, number>();
-const CONTENT_DEDUP_TTL_MS = 60_000; // 60 seconds
-
-function isRecentDuplicate(openId: string, text: string): boolean {
-  const key = `${openId}::${text.trim()}`;
-  const last = recentCommands.get(key);
-  if (last && Date.now() - last < CONTENT_DEDUP_TTL_MS) {
-    console.log(`[feishu] Skipping recent duplicate: openId=${openId} text="${text.trim().slice(0, 40)}"`);
-    return true;
-  }
-  recentCommands.set(key, Date.now());
-  // Prune stale entries periodically
-  if (recentCommands.size > 100) {
-    const cutoff = Date.now() - CONTENT_DEDUP_TTL_MS;
-    for (const [k, ts] of recentCommands) {
-      if (ts < cutoff) recentCommands.delete(k);
-    }
-  }
-  return false;
-}
-
 /** Download a Feishu image by image_key to a temp file and return the path. */
 async function downloadFeishuImage(imageKey: string, label: string): Promise<string | undefined> {
   if (!client) return undefined;
@@ -768,8 +744,6 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
 
       // Skip duplicate messages (Feishu retries events if handler takes >3s)
       if (isDuplicate(event.message.message_id)) return;
-      // Also skip recent duplicates by content (same sender, same text within 60s)
-      if (isRecentDuplicate(senderOpenId, text)) return;
       console.log(`[feishu] ${new Date().toISOString()} Received message_id=${event.message.message_id} type=${event.message.message_type} text="${text.slice(0, 80)}"`);
 
       // ── /max:unpair ────────────────────────────────────────
