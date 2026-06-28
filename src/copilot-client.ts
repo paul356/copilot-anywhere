@@ -121,6 +121,15 @@ const alwaysAllowHooks = {
 
 const sessionCache = new Map<string, CopilotSession>();
 
+/** In-flight `getOrCreateSession` promises keyed by cacheKey. Lets a second
+ *  concurrent caller (e.g. Feishu + Telegram hitting the same workspace
+ *  right after a daemon restart) reuse the first caller's resume/create
+ *  instead of issuing a duplicate one — without this, both callers pass
+ *  the cache check, both call resumeSession/createSession, and the second
+ *  sessionCache.set overwrites the first, leaving a stale handle whose
+ *  event subscriptions still fire and pollute the other channel's output. */
+const inflightSessions = new Map<string, Promise<CopilotSession>>();
+
 /**
  * Get or create a CopilotSession for a workspace.
  *
@@ -135,14 +144,56 @@ export async function getOrCreateSession(
 ): Promise<CopilotSession> {
   // Ensure this workspace has a pool slot (may evict oldest non-busy).
   if (wsName !== "default") {
-    ensurePoolSlot(wsName);
+    if (!ensurePoolSlot(wsName)) {
+      // All MAX_ACTIVE slots are busy and none can be evicted. Don't
+      // create a session that no one tracks — the next LRU pass would
+      // just orphan it again. Surface the contention to the caller.
+      throw new Error(
+        `Cannot allocate session for workspace '${wsName}': all ${MAX_ACTIVE} workspace slots are busy. ` +
+        `Wait for an active prompt to finish, or use /max:ws switch to an idle workspace.`
+      );
+    }
   }
 
   recordPoolUse(wsName);
   const cacheKey = `${wsName}:${options.workingDirectory ?? "cwd"}`;
+
+  // Fast path: already cached — return immediately.
   const cached = sessionCache.get(cacheKey);
   if (cached) return cached;
 
+  // Single-flight: if another caller is already mid-create/mid-resume for
+  // this cacheKey, share its promise. Prevents the
+  // "Feishu + Telegram race the first prompt after restart" bug where
+  // both pass the cache check above, both hit resumeSession/createSession,
+  // and the second sessionCache.set overwrites the first. Cleanup happens
+  // in the first caller's finally — the second caller just rides the same
+  // promise (resolved value or rejected error).
+  const inflight = inflightSessions.get(cacheKey);
+  if (inflight) return inflight;
+
+  const promise = doGetOrCreateSession(wsName, port, options);
+  inflightSessions.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    // Clear whether the inner call resolved or threw. The entry must
+    // NOT outlive the operation, otherwise future callers would get a
+    // stale settled promise.
+    inflightSessions.delete(cacheKey);
+  }
+}
+
+/** Inner body of getOrCreateSession — wrapped by the single-flight
+ *  inflight map above. Only the caller that wins the inflight race
+ *  (i.e. the one that called getOrCreateSession first for this cacheKey
+ *  with a cache miss) ever executes this function. */
+async function doGetOrCreateSession(
+  wsName: string,
+  port: number,
+  options: SessionOptions,
+): Promise<CopilotSession> {
+  const cacheKey = `${wsName}:${options.workingDirectory ?? "cwd"}`;
   const cli = await getClient(port);
   const workingDir = options.workingDirectory;
 
@@ -211,10 +262,20 @@ export async function getOrCreateSession(
   return session;
 }
 
-/** Invalidate a cached session (e.g., after an error) */
-export function invalidateSession(wsName: string, workingDir?: string): void {
-  const cacheKey = `${wsName}:${workingDir ?? "cwd"}`;
-  sessionCache.delete(cacheKey);
+/** Invalidate a cached session (e.g., after an error or pool eviction).
+ *  Removes every cache entry whose key starts with `${wsName}:`.
+ *
+ *  The eviction path (ensurePoolSlot's LRU eviction, removeFromPool) only
+ *  has the wsName, not the workingDir that was used to construct the cache
+ *  key at session creation. A key built from wsName alone would miss the
+ *  real entry and leave the session dangling in the cache, causing the
+ *  next getOrCreateSession for that workspace to return the stale handle
+ *  instead of recreating. Prefix scan is the safe fix. */
+export function invalidateSession(wsName: string): void {
+  const prefix = `${wsName}:`;
+  for (const key of [...sessionCache.keys()]) {
+    if (key.startsWith(prefix)) sessionCache.delete(key);
+  }
 }
 
 /** Invalidate all cached sessions (e.g., after CLI restart) */
@@ -235,14 +296,20 @@ interface PoolEntry {
 const workspacePool = new Map<string, PoolEntry>();
 const MAX_ACTIVE = 5;
 
-/** Ensure the pool has a slot for `wsName`. If full, evicts the oldest non-busy workspace (excluding "default"). */
-export function ensurePoolSlot(wsName: string): void {
-  if (workspacePool.has(wsName)) return;
+/** Ensure the pool has a slot for `wsName`. If full, evicts the oldest
+ *  non-busy, non-default workspace.
+ *
+ *  Returns `true` if a slot was allocated (or already existed for this
+ *  wsName). Returns `false` if all MAX_ACTIVE slots are busy and no
+ *  eviction was possible — caller should treat that as a hard failure
+ *  (don't create a session that no one will manage). */
+export function ensurePoolSlot(wsName: string): boolean {
+  if (workspacePool.has(wsName)) return true;
 
   if (workspacePool.size < MAX_ACTIVE) {
     workspacePool.set(wsName, { lastUsed: Date.now(), busy: false });
     console.log(`[copilot-client] Pool slot allocated for '${wsName}' (${workspacePool.size}/${MAX_ACTIVE})`);
-    return;
+    return true;
   }
 
   // Find oldest non-busy workspace to evict.
@@ -257,8 +324,11 @@ export function ensurePoolSlot(wsName: string): void {
   }
 
   if (!oldestKey) {
+    // All MAX_ACTIVE slots are busy. Caller will throw so the user gets a
+    // clear error instead of silently creating a session that nothing
+    // tracks in the pool.
     console.warn(`[copilot-client] All ${MAX_ACTIVE} workspaces are busy — cannot allocate slot for '${wsName}'`);
-    return; // Caller will fall back to default or retry.
+    return false;
   }
 
   console.log(`[copilot-client] Evicting workspace '${oldestKey}' (last used ${Math.round((Date.now() - oldestTime) / 1000)}s ago) to make room for '${wsName}'`);
@@ -266,6 +336,7 @@ export function ensurePoolSlot(wsName: string): void {
   workspacePool.delete(oldestKey);
   workspacePool.set(wsName, { lastUsed: Date.now(), busy: false });
   console.log(`[copilot-client] Pool slot allocated for '${wsName}' (${workspacePool.size}/${MAX_ACTIVE})`);
+  return true;
 }
 
 /** Mark a workspace as busy (processing a prompt). */

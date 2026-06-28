@@ -23,8 +23,19 @@ import { RoutedMessage, executeMaxCommand, type Attachment } from "./command-rou
 import { CLIProcess } from "./cli-process.js";
 import { getActiveWorkspace } from "./store/db.js";
 import { getClient } from "./copilot/client.js";
-import { invalidateSession } from "./copilot-client.js";
+import { invalidateSession, markPoolBusy, markPoolIdle } from "./copilot-client.js";
 import { config } from "./config.js";
+import { appendFileSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+
+const MH_DBG_LOG = join(homedir(), ".max", "feishu-debug.log");
+function mhDbg(...args: unknown[]): void {
+  try {
+    const line = `[${new Date().toISOString()}] [mh] ${args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ")}\n`;
+    appendFileSync(MH_DBG_LOG, line);
+  } catch { /* ignore */ }
+}
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -762,6 +773,8 @@ export class MessageHandler {
 
   private async processOne(item: QueuedMessage, channelId: string, wsName: string): Promise<void> {
     const { routed } = item;
+    console.log(`[mh:dbg] processOne ENTER ch=${channelId} ws=${wsName} type=${routed.type}`);
+    mhDbg(`processOne ENTER ch=${channelId} ws=${wsName} type=${routed.type} text=${JSON.stringify((routed as any).text?.slice(0, 60))}`);
     // Wrap the channel's callback so every assistant reply (prompt / cli / max
     // command) carries the per-turn workspace tag. The wrapper is a no-op when
     // disabled by config.
@@ -784,156 +797,177 @@ export class MessageHandler {
       }
 
       case "prompt": {
-        await this.handleWithRetry(channelId, wsName, async () => {
-          const { session, workspaceName, workingDir } = await this.options.getSessionForChannel(channelId);
-          console.log(`[message-handler] Prompt → session ${session.sessionId.slice(0, 8)}… ws=${workspaceName} dir=${workingDir ?? "cwd"} channel=${channelId}`);
-          console.log(`[message-handler] Prompt text (${routed.text.length} chars): ${routed.text.slice(0, 200)}`);
-
-          // Check model capabilities and filter attachments
-          const { filtered: safeAttachments, warning } = await filterAttachments(routed.attachments ?? []);
-          const effectivePrompt = safeAttachments.length > 0 && warning
-            ? routed.text + warning
-            : routed.text;
-          if (routed.attachments && routed.attachments.length > 0) {
-            console.log(`[message-handler] Attachments: ${routed.attachments.length} provided → ${safeAttachments.length} passed (${warning ? "vision not supported" : "all ok"})`);
-          }
-
-          // Store session→composite-key mapping so handleUserInput can find the right callback
-          this.sessionChannels.set(session.sessionId, qKey);
-          this.activeCallbacks.set(qKey, callback);
-
-          // Debug: log all session events related to tools/permissions/errors
-          // Track session.error events so we can report them to the user
-          let sessionError: string | null = null;
-          const unsubDebug = session.on((event: any) => {
-            const t = event?.type ?? "";
-            if (t === "session.error") {
-              const msg = event?.data?.message ?? event?.message ?? "Unknown session error";
-              sessionError = msg;
+        // Mark workspace busy for the entire prompt lifecycle (including
+        // retries, session.idle wait, hard timer). Must come before
+        // getSessionForChannel so ensurePoolSlot's LRU eviction can see
+        // us as busy and won't kick this workspace mid-prompt.
+        markPoolBusy(wsName);
+        try {
+          await this.handleWithRetry(channelId, wsName, async () => {
+            const { session, workspaceName, workingDir } = await this.options.getSessionForChannel(channelId);
+            console.log(`[message-handler] Prompt → session ${session.sessionId.slice(0, 8)}… ws=${workspaceName} dir=${workingDir ?? "cwd"} channel=${channelId}`);
+            console.log(`[message-handler] Prompt text (${routed.text.length} chars): ${routed.text.slice(0, 200)}`);
+  
+            // Check model capabilities and filter attachments
+            const { filtered: safeAttachments, warning } = await filterAttachments(routed.attachments ?? []);
+            const effectivePrompt = safeAttachments.length > 0 && warning
+              ? routed.text + warning
+              : routed.text;
+            if (routed.attachments && routed.attachments.length > 0) {
+              console.log(`[message-handler] Attachments: ${routed.attachments.length} provided → ${safeAttachments.length} passed (${warning ? "vision not supported" : "all ok"})`);
             }
-            if (t.includes("tool") || t.includes("permission") || t.includes("error") || t.includes("session.error")) {
-              console.log(`[message-handler] Event ${t}: ${JSON.stringify(event).slice(0, 500)}`);
-            }
-          });
-
-          const t0 = Date.now();
-          // Hard timer that resets on every session event but pauses while
-          // the LLM is blocked on ask_user waiting for the user. There is
-          // no "inactivity" timeout — only this 1-hour hard cap.
-          let hardTimerWon = false;
-          const hardTimerPromise = new Promise<never>((_, reject) => {
-            this.hardTimerRejects.set(qKey, (err) => {
-              hardTimerWon = true;
-              reject(err);
+  
+            // Store session→composite-key mapping so handleUserInput can find the right callback
+            this.sessionChannels.set(session.sessionId, qKey);
+            this.activeCallbacks.set(qKey, callback);
+  
+            // Debug: log all session events related to tools/permissions/errors
+            // Track session.error events so we can report them to the user
+            let sessionError: string | null = null;
+            const unsubDebug = session.on((event: any) => {
+              const t = event?.type ?? "";
+              if (t === "session.error") {
+                const msg = event?.data?.message ?? event?.message ?? "Unknown session error";
+                sessionError = msg;
+              }
+              if (t.includes("tool") || t.includes("permission") || t.includes("error") || t.includes("session.error")) {
+                console.log(`[message-handler] Event ${t}: ${JSON.stringify(event).slice(0, 500)}`);
+              }
             });
-          });
-          this.armHardTimer(qKey);
-          const unsubReset = session.on(() => this.armHardTimer(qKey));
-
-          // Collect every subscription we register so a single try/finally
-          // can unsubscribe all of them, regardless of which side of the
-          // race wins (idle / send-error / hard-timer / future errors).
-          const cleanupFns: Array<() => void> = [unsubReset, unsubDebug];
-
-          const fullText = await (async () => {
-            try {
-              return await Promise.race([
-                new Promise<string>((resolve, reject) => {
-                  let fullText = "";
-                  const unsubDelta = session.on("assistant.message_delta", (event) => {
-                    const chunk = event.data.deltaContent;
-                    if (chunk) {
-                      fullText += chunk;
-                      callback(fullText, false);
+  
+            const t0 = Date.now();
+            // Hard timer that resets on every session event but pauses while
+            // the LLM is blocked on ask_user waiting for the user. There is
+            // no "inactivity" timeout — only this 1-hour hard cap.
+            let hardTimerWon = false;
+            const hardTimerPromise = new Promise<never>((_, reject) => {
+              this.hardTimerRejects.set(qKey, (err) => {
+                hardTimerWon = true;
+                reject(err);
+              });
+            });
+            this.armHardTimer(qKey);
+            const unsubReset = session.on(() => this.armHardTimer(qKey));
+  
+            // Collect every subscription we register so a single try/finally
+            // can unsubscribe all of them, regardless of which side of the
+            // race wins (idle / send-error / hard-timer / future errors).
+            const cleanupFns: Array<() => void> = [unsubReset, unsubDebug];
+  
+            const fullText = await (async () => {
+              try {
+                return await Promise.race([
+                  new Promise<string>((resolve, reject) => {
+                    let fullText = "";
+                    const unsubDelta = session.on("assistant.message_delta", (event) => {
+                      const chunk = event.data.deltaContent;
+                      if (chunk) {
+                        fullText += chunk;
+                        callback(fullText, false);
+                      }
+                    });
+                    cleanupFns.push(unsubDelta);
+  
+                    const unsubIdle = session.on("session.idle", () => {
+                      if (sessionError) {
+                        reject(new Error(sessionError));
+                        return;
+                      }
+                      console.log(`[message-handler] Prompt response (${Date.now() - t0}ms, ${fullText.length} chars): ${fullText.slice(0, 300)}`);
+                      callback("", true);
+                      resolve(fullText);
+                    });
+                    cleanupFns.push(unsubIdle);
+  
+                    const sendPayload: { prompt: string; attachments?: Attachment[] } = { prompt: effectivePrompt };
+                    if (safeAttachments.length > 0) {
+                      sendPayload.attachments = safeAttachments;
                     }
-                  });
-                  cleanupFns.push(unsubDelta);
-
-                  const unsubIdle = session.on("session.idle", () => {
-                    if (sessionError) {
-                      reject(new Error(sessionError));
-                      return;
-                    }
-                    console.log(`[message-handler] Prompt response (${Date.now() - t0}ms, ${fullText.length} chars): ${fullText.slice(0, 300)}`);
-                    callback("", true);
-                    resolve(fullText);
-                  });
-                  cleanupFns.push(unsubIdle);
-
-                  const sendPayload: { prompt: string; attachments?: Attachment[] } = { prompt: effectivePrompt };
-                  if (safeAttachments.length > 0) {
-                    sendPayload.attachments = safeAttachments;
+                    session.send(sendPayload).catch((err: unknown) => {
+                      console.error(`[message-handler] Prompt send failed: ${err instanceof Error ? err.message : String(err)}`);
+                      reject(err instanceof Error ? err : new Error(String(err)));
+                    });
+                  }),
+                  hardTimerPromise,
+                ]);
+              } finally {
+                // Release every subscription and map entry — success, idle,
+                // send-error, hard-timer, or any future failure all go
+                // through this single block.
+                for (const fn of cleanupFns) {
+                  try { fn(); } catch { /* best effort */ }
+                }
+                this.clearHardTimer(qKey);
+                this.hardTimerRejects.delete(qKey);
+                this.sessionChannels.delete(session.sessionId);
+                this.activeCallbacks.delete(qKey);
+  
+                // If a stuck ask_user is waiting on this qKey, resolve it
+                // with a fallback so the SDK's onUserInputRequest returns
+                // and the session isn't permanently blocked.
+                const stuck = this.pendingInput.get(qKey);
+                if (stuck) {
+                  this.pendingInput.delete(qKey);
+                  stuck.resolve(ASK_USER_FALLBACK_ANSWER);
+                }
+  
+                // On hard-timer timeout, invalidate the cached Copilot
+                // session so the next prompt in this workspace gets a fresh
+                // one instead of reusing the half-finished turn.
+                if (hardTimerWon) {
+                  try {
+                    invalidateSession(workspaceName);
+                    console.log(`[message-handler] Hard-timer timeout — invalidated Copilot session for ws=${workspaceName}`);
+                  } catch (err) {
+                    console.warn(`[message-handler] Failed to invalidate session after timeout: ${err instanceof Error ? err.message : String(err)}`);
                   }
-                  session.send(sendPayload).catch((err: unknown) => {
-                    console.error(`[message-handler] Prompt send failed: ${err instanceof Error ? err.message : String(err)}`);
-                    reject(err instanceof Error ? err : new Error(String(err)));
-                  });
-                }),
-                hardTimerPromise,
-              ]);
-            } finally {
-              // Release every subscription and map entry — success, idle,
-              // send-error, hard-timer, or any future failure all go
-              // through this single block.
-              for (const fn of cleanupFns) {
-                try { fn(); } catch { /* best effort */ }
-              }
-              this.clearHardTimer(qKey);
-              this.hardTimerRejects.delete(qKey);
-              this.sessionChannels.delete(session.sessionId);
-              this.activeCallbacks.delete(qKey);
-
-              // If a stuck ask_user is waiting on this qKey, resolve it
-              // with a fallback so the SDK's onUserInputRequest returns
-              // and the session isn't permanently blocked.
-              const stuck = this.pendingInput.get(qKey);
-              if (stuck) {
-                this.pendingInput.delete(qKey);
-                stuck.resolve(ASK_USER_FALLBACK_ANSWER);
-              }
-
-              // On hard-timer timeout, invalidate the cached Copilot
-              // session so the next prompt in this workspace gets a fresh
-              // one instead of reusing the half-finished turn.
-              if (hardTimerWon) {
-                try {
-                  invalidateSession(workspaceName, workingDir);
-                  console.log(`[message-handler] Hard-timer timeout — invalidated Copilot session for ws=${workspaceName}`);
-                } catch (err) {
-                  console.warn(`[message-handler] Failed to invalidate session after timeout: ${err instanceof Error ? err.message : String(err)}`);
                 }
               }
-            }
-          })();
+            })();
         });
+        } finally {
+          markPoolIdle(wsName);
+        }
         break;
       }
 
       case "cli-command": {
-        console.log(`[message-handler] Dispatching cli-command: ${routed.command.slice(0, 80)} → channel=${channelId}`);
-        if (!this.options.cliProcess.isAlive()) {
-          console.error(`[message-handler] CLI process not alive for command: ${routed.command.slice(0, 80)}`);
-          throw new Error("CLI process is not running");
-        }
+        // Mark workspace busy so concurrent cross-workspace activity (in
+        // other channels or other qKeys) doesn't LRU-evict this workspace
+        // mid-PTY-write. The PTY itself is a single resource — if two
+        // cli-commands for DIFFERENT workspaces in the SAME channel run
+        // concurrently their PTY outputs interleave. That race is a
+        // separate concern; the busy flag here only protects the pool
+        // entry, not the PTY.
+        markPoolBusy(wsName);
         try {
-          const t0 = Date.now();
-          const rawOutput = await this.options.cliProcess.sendCommandAndWait(
-            routed.command,
-            CLI_COMMAND_TIMEOUT_MS,
-            CLI_COMMAND_SETTLE_MS,
-          );
-          const st = createTerminalState();
-          renderInto(rawOutput, st);
-          const { content: firstPage, hasPager } = stripPager(extractScreen(st));
-          const result = hasPager
-            ? await collectPagerContent(this.options.cliProcess, st, firstPage)
-            : firstPage;
-          console.log(`[message-handler] cli-command response (${Date.now() - t0}ms, ${result.length} chars): ${result.slice(0, 120)}`);
-          callback(result || `(command sent: ${routed.command})`, true);
-        } catch (err) {
-          console.error(`[message-handler] cli-command failed: ${routed.command.slice(0, 80)} — ${err instanceof Error ? err.message : String(err)}`);
-          // Timeout or PTY error — still confirm the command was sent
-          callback(`→ ${routed.command}\n(${err instanceof Error ? err.message : String(err)})`, true);
+          console.log(`[message-handler] Dispatching cli-command: ${routed.command.slice(0, 80)} → channel=${channelId}`);
+          if (!this.options.cliProcess.isAlive()) {
+            console.error(`[message-handler] CLI process not alive for command: ${routed.command.slice(0, 80)}`);
+            throw new Error("CLI process is not running");
+          }
+          try {
+            const t0 = Date.now();
+            const rawOutput = await this.options.cliProcess.sendCommandAndWait(
+              routed.command,
+              CLI_COMMAND_TIMEOUT_MS,
+              CLI_COMMAND_SETTLE_MS,
+            );
+            const st = createTerminalState();
+            renderInto(rawOutput, st);
+            const { content: firstPage, hasPager } = stripPager(extractScreen(st));
+            const result = hasPager
+              ? await collectPagerContent(this.options.cliProcess, st, firstPage)
+              : firstPage;
+            console.log(`[message-handler] cli-command response (${Date.now() - t0}ms, ${result.length} chars): ${result.slice(0, 120)}`);
+            callback(result || `(command sent: ${routed.command})`, true);
+          } catch (err) {
+            console.error(`[message-handler] cli-command failed: ${routed.command.slice(0, 80)} — ${err instanceof Error ? err.message : String(err)}`);
+            // Timeout or PTY error — still confirm the command was sent
+            callback(`→ ${routed.command}\n(${err instanceof Error ? err.message : String(err)})`, true);
+          }
+        } finally {
+          markPoolIdle(wsName);
         }
         break;
       }
