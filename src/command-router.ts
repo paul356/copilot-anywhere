@@ -11,6 +11,7 @@
  */
 
 import { createWorkspace, deleteWorkspace, listWorkspaces, getWorkspace, setActiveWorkspace, getActiveWorkspace } from "./store/db.js";
+import { destroyAndInvalidateSession } from "./copilot-client.js";
 import { join } from "path";
 import { existsSync } from "fs";
 
@@ -146,11 +147,44 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
         "  /max:restart                 Restart the daemon",
         "  /max:skip                    Skip the current question",
         "  /max:cancel                  Cancel queued messages, or in-flight if queue is empty",
+        "  /max:clear                   Clear the current workspace's Max conversation",
         "  /max:status                  Show daemon status",
         "  /max:help                    Show this help",
         "",
         "Use /help for Copilot CLI commands.",
       ].join("\n"),
+    };
+  },
+
+  async clear(args, ctx) {
+    // /max:clear takes no parameters. The active workspace is implied
+    // (each channel has its own active workspace). If a parameter is
+    // passed, the user probably wanted to clear a specific workspace —
+    // refuse and tell them how to switch first.
+    if (args.length > 0) {
+      return {
+        reply: "Usage: /max:clear (no parameters; clears the current workspace's Max conversation). To clear a different workspace, /max:ws switch to it first.",
+      };
+    }
+    const wsName = ctx.activeWorkspace;
+    if (!destroyAndInvalidateSession(wsName)) {
+      return {
+        reply: `⏳ Workspace '${wsName}' is busy with an in-flight prompt. Use /max:cancel first, then /max:clear.`,
+      };
+    }
+    return {
+      reply: `🧹 Max session cleared for workspace '${wsName}'. The next prompt will start a fresh conversation.`,
+    };
+  },
+
+  async clearHint(_args, _ctx) {
+    // Returned when a chat-channel user types raw `/clear`. The Copilot
+    // CLI TUI's own /clear only clears the CLI's screen buffer; it
+    // never reaches the SDK session that handles chat-channel prompts,
+    // so routing it to the PTY is misleading. Tell the user to use
+    // /max:clear instead.
+    return {
+      reply: "⚠️ `/clear` 在 chat 渠道已禁用 — 它只清 Copilot CLI TUI 自己的屏显，不会清 Max 的对话历史。\n请用 `/max:clear` 来清空当前 workspace 的对话上下文。\n(TUI 终端里直接打 `/clear` 仍按 CLI 自己的方式工作。)",
     };
   },
 
@@ -166,6 +200,20 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
 
 export function route(message: string, ctx: { senderId: string; channelKey: string; messageId?: string }): RoutedMessage {
   const trimmed = message.trim();
+
+  // Special-case raw `/clear` in chat channels: route to clearHint
+  // instead of forwarding to the Copilot CLI PTY. The CLI's /clear
+  // only clears the CLI's own TUI screen, not Max's SDK session —
+  // forwarding it would be misleading (the user thinks the
+  // conversation is cleared but turn 23 still shows up next prompt).
+  // TUI users keep the original behavior (still goes to cli-command
+  // → PTY → CLI's own /clear).
+  if (trimmed === "/clear" && (
+    ctx.channelKey.startsWith("feishu:") ||
+    ctx.channelKey.startsWith("telegram:")
+  )) {
+    return { type: "max-command", name: "clear-hint", args: [], senderId: ctx.senderId };
+  }
 
   if (trimmed.startsWith("/max:")) {
     // ─── Max command ───

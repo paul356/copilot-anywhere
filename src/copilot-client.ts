@@ -19,6 +19,7 @@ import {
 import {
   getWorkspace,
   saveWorkspaceSessionId,
+  clearWorkspaceSessionId,
 } from "./store/db.js";
 
 // ── User Input Delegation ──────────────────────────────────────────
@@ -281,6 +282,50 @@ export function invalidateSession(wsName: string): void {
 /** Invalidate all cached sessions (e.g., after CLI restart) */
 export function invalidateAllSessions(): void {
   sessionCache.clear();
+}
+
+/** Destroy the cached SDK session for a workspace, drop it from the
+ *  workspace pool, and clear its persisted `copilot_session_id` in
+ *  worker_sessions. After this returns true, the next
+ *  getOrCreateSession for `wsName` will allocate a fresh pool slot
+ *  and go through the createSession path (resumeSession on the
+ *  destroyed id will fail, and the existing fallback in
+ *  getOrCreateSession already handles that).
+ *
+ *  Returns true on success, false if the workspace is currently busy
+ *  with an in-flight prompt — destruction would orphan that prompt's
+ *  event subscriptions, so the caller (the /max:clear handler) refuses
+ *  and tells the user to /max:cancel first. The `default` workspace
+ *  has no pool entry and no persisted id; the function is still safe
+ *  to call on it (just clears sessionCache). */
+export function destroyAndInvalidateSession(wsName: string): boolean {
+  const entry = workspacePool.get(wsName);
+  if (entry?.busy) {
+    return false;
+  }
+
+  // Find and destroy any cached session for this workspace. Fire-and-
+  // forget — the SDK destroy is best-effort and we already committed
+  // to clearing. (The caller checked busy; either there is no in-
+  // flight prompt, or we refused and the caller is not calling us.)
+  for (const [key, session] of sessionCache.entries()) {
+    if (key.startsWith(`${wsName}:`)) {
+      session.destroy().catch((err: unknown) => {
+        console.warn(`[copilot-client] Session destroy failed for ${key}: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      break;
+    }
+  }
+
+  // Clear sessionCache (prefix scan), pool entry, and persisted id.
+  // invalidateSession now ignores workingDir and deletes every entry
+  // whose key starts with `${wsName}:`.
+  invalidateSession(wsName);
+  workspacePool.delete(wsName);
+  clearWorkspaceSessionId(wsName);
+
+  console.log(`[copilot-client] Destroyed and invalidated session for workspace '${wsName}'`);
+  return true;
 }
 
 // ── Workspace Pool ────────────────────────────────────────────────
