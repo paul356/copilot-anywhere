@@ -838,7 +838,7 @@ function cmdHelp(): void {
   console.log(`    ${C.coral("/max:copy")}              copy last response`);
   console.log(`    ${C.coral("/max:image <path>")}      send an image to the model`);
   console.log(`    ${C.coral("/max:restart")}           restart daemon`);
-  console.log(`    ${C.coral("/max:clear")}             clear screen`);
+  console.log(`    ${C.coral("/max:clear")}             clear Max conversation and screen`);
   console.log(`    ${C.coral("/quit")}  ${C.coral("/exit")}          exit`);
   console.log();
   console.log(C.dim("    enter=submit  alt+enter=newline  esc=cancel"));
@@ -918,8 +918,23 @@ function processUserInput(trimmed: string): void {
     }
 
     if (trimmed === "/max:clear") {
+      // Send to daemon to actually clear the SDK session. The
+      // previous local `console.clear()` was a stub — the SDK
+      // session stayed alive and the LLM still saw all 23 turns
+      // on the next prompt. Daemon's `clear` handler calls
+      // `destroyAndInvalidateSession`; response comes back via
+      // SSE in the `message` event.
+      //
+      // We also clear the visible TUI screen so the user gets the
+      // "fresh slate" UX that terminal users expect. Chat channels
+      // don't need this because they have no terminal to clear.
+      // console.clear() runs first so the user doesn't see the old
+      // chat history while waiting for the daemon's response.
       console.clear();
-      if (resolveNextPrompt) { resolveNextPrompt(); resolveNextPrompt = null; }
+      activeRequestId += 1;
+      activeRequestStartedAt = Date.now();
+      startThinking();
+      sendMessage("/max:clear", activeRequestId);
       return;
     }
 

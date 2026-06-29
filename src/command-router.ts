@@ -201,16 +201,17 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
 export function route(message: string, ctx: { senderId: string; channelKey: string; messageId?: string }): RoutedMessage {
   const trimmed = message.trim();
 
-  // Special-case raw `/clear` in chat channels: route to clearHint
-  // instead of forwarding to the Copilot CLI PTY. The CLI's /clear
-  // only clears the CLI's own TUI screen, not Max's SDK session —
-  // forwarding it would be misleading (the user thinks the
-  // conversation is cleared but turn 23 still shows up next prompt).
-  // TUI users keep the original behavior (still goes to cli-command
-  // → PTY → CLI's own /clear).
+  // Special-case raw `/clear` in chat channels AND TUI: route to
+  // clearHint instead of forwarding to the Copilot CLI PTY. The
+  // CLI's /clear only clears the CLI's own TUI screen, not Max's
+  // SDK session — forwarding it would be misleading (the user
+  // thinks the conversation is cleared but turn 23 still shows up
+  // next prompt). TUI was added in commit a following the principle
+  // "TUI is a chat-like channel, behavior should not differ".
   if (trimmed === "/clear" && (
     ctx.channelKey.startsWith("feishu:") ||
-    ctx.channelKey.startsWith("telegram:")
+    ctx.channelKey.startsWith("telegram:") ||
+    ctx.channelKey.startsWith("tui:")
   )) {
     return { type: "max-command", name: "clear-hint", args: [], senderId: ctx.senderId };
   }
