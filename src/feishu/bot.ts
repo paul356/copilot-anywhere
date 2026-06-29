@@ -2,7 +2,7 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { randomUUID } from "crypto";
 import { config, persistFeishuAuthorizedOpenId, clearFeishuAuthorizedOpenId } from "../config.js";
 import { route, RoutedMessage, executeMaxCommand, CommandResult, type Attachment } from "../command-router.js";
-import { MessageHandler } from "../message-handler.js";
+import { MessageHandler, buildWorkspaceTag } from "../message-handler.js";
 import { isMessageProcessed, markMessageProcessed, getActiveWorkspace } from "../store/db.js";
 import { buildCardContent, buildTextContent, buildQuestionCard, chunkMessage } from "./formatter.js";
 import { readFileSync } from "fs";
@@ -257,7 +257,7 @@ async function drainHeldMessages(openId: string, wsName: string, messageHandler:
       }
       thinkingSent = true;
       console.log(`[feishu:drainHeld] sendThinking fired | thinkingSent=${thinkingSent} busy=true pendingQ=false ws=${wsName}`);
-      void sendReply(messageId, chatId, "⏳ 正在思考...");
+      void sendReply(messageId, chatId, `${buildWorkspaceTag(wsName)}⏳ 正在思考...`);
     };
     const resetThinkingTimer = (fromEarlySend: boolean = false) => {
       clearThinkingTimer(openId, wsName);
@@ -881,7 +881,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         }
         thinkingSent = true;
         console.log(`[feishu:main] sendThinking fired | thinkingSent=${thinkingSent} busy=true pendingQ=false ws=${activeWs}`);
-        void sendReply(event.message.message_id, event.message.chat_id, "⏳ 正在思考...");
+        void sendReply(event.message.message_id, event.message.chat_id, `${buildWorkspaceTag(activeWs)}⏳ 正在思考...`);
       };
       const resetThinkingTimer = (fromEarlySend: boolean = false) => {
         clearThinkingTimer(senderOpenId, activeWs);

@@ -83,8 +83,11 @@ function sleep(ms: number): Promise<void> {
  * Returned as `""` when disabled or when no workspace name is known. The tag is
  * intended for the user, never for the LLM — do NOT splice it into the
  * messages array or session state.
+ *
+ * Exported so other channels (e.g. Feishu's "正在思考..." notice) can prepend
+ * the same tag for consistency with assistant replies.
  */
-function buildWorkspaceTag(wsName: string | undefined): string {
+export function buildWorkspaceTag(wsName: string | undefined): string {
   if (!config.workspaceTagEnabled) return "";
   if (!wsName) return "";
   return `[ws: ${wsName}]\n`;
