@@ -139,6 +139,17 @@ let _modelVisionSupport: { modelId: string; supportsVision: boolean } | null = n
  */
 async function modelSupportsVision(): Promise<boolean> {
   const modelId = config.copilotModel;
+
+  // Whitelist takes precedence — see VISION_CAPABLE_MODEL_OVERRIDES in config.ts.
+  // If the active model is on the whitelist, skip the SDK round-trip entirely.
+  if (config.visionCapableModelOverrides.has(modelId)) {
+    if (!_modelVisionSupport || _modelVisionSupport.modelId !== modelId) {
+      _modelVisionSupport = { modelId, supportsVision: true };
+      console.log(`[message-handler] Model vision support: model=${modelId} vision=true (whitelist override)`);
+    }
+    return true;
+  }
+
   if (_modelVisionSupport && _modelVisionSupport.modelId === modelId) {
     return _modelVisionSupport.supportsVision;
   }

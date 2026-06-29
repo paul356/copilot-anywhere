@@ -150,16 +150,30 @@ function setThinkingTimer(openId: string, wsName: string, timer: ReturnType<type
   thinkingTimers.set(thinkingTimerKey(openId, wsName), timer);
 }
 
-/** Download a Feishu image by image_key to a temp file and return the path. */
-async function downloadFeishuImage(imageKey: string, label: string): Promise<string | undefined> {
+/** Download a user-sent Feishu image to a temp file and return the path.
+ *
+ * Per Feishu API, `im.v1.image.get` only works for images the bot itself uploaded.
+ * User-sent images MUST be fetched via `im.v1.messageResource.get` using the
+ * parent message_id and the image_key as file_key. */
+async function downloadFeishuImage(
+  messageId: string,
+  imageKey: string,
+  label: string,
+): Promise<string | undefined> {
   if (!client) return undefined;
   try {
-    const resp = await client.im.v1.image.get({ path: { image_key: imageKey } });
+    const resp = await client.im.v1.messageResource.get({
+      path: { message_id: messageId, file_key: imageKey },
+      params: { type: "image" },
+      // Request Content-Disposition header so we can recover the original filename/ext.
+    }, { headers: { "Content-Type": "application/json" } });
     if (!resp || typeof resp.writeFile !== "function") {
       console.warn("[feishu] Unexpected image download response:", typeof resp);
       return undefined;
     }
-    const tmpPath = join(tmpdir(), `max-feishu-${label}-${Date.now()}.jpg`);
+    const filename = extractFilenameFromHeaders(resp.headers) || `feishu-image-${label}.jpg`;
+    const ext = (filename.split(".").pop() || "jpg").toLowerCase();
+    const tmpPath = join(tmpdir(), `max-feishu-${label}-${Date.now()}.${ext}`);
     await resp.writeFile(tmpPath);
     return tmpPath;
   } catch (err) {
@@ -665,7 +679,7 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         const content = JSON.parse(event.message.content) as { image_key?: string };
         const imageKey = content.image_key;
         if (imageKey) {
-          const tmpPath = await downloadFeishuImage(imageKey, "msg");
+          const tmpPath = await downloadFeishuImage(event.message.message_id, imageKey, "msg");
           if (tmpPath) {
             try {
               const buffer = readFileSync(tmpPath);

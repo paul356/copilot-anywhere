@@ -45,6 +45,27 @@ if (!Number.isInteger(parsedWorkerTimeout) || parsedWorkerTimeout <= 0) {
 
 export const DEFAULT_MODEL = "claude-sonnet-4.6";
 
+/**
+ * Vision-capable model whitelist.
+ *
+ * The Copilot SDK's `listModels()` is the authoritative source for vision support,
+ * but its server-side registry does not always enumerate every model a user has
+ * access to (e.g. aliases, custom/internal IDs). When a model ID isn't in the
+ * registry, the SDK falls back to `vision=false`, which causes Max to silently
+ * strip image attachments before they reach the LLM.
+ *
+ * Models on this list are treated as vision-capable regardless of what the SDK
+ * reports. Order of precedence in `modelSupportsVision()`:
+ *   1. This whitelist (user-declared authority)
+ *   2. SDK-reported `capabilities.supports.vision`
+ *   3. default `false`
+ *
+ * Extend by adding a model ID. Matching is exact (case-sensitive).
+ */
+const VISION_CAPABLE_MODEL_OVERRIDES: ReadonlySet<string> = new Set<string>([
+  "MiniMax-M3",
+]);
+
 let _copilotModel = raw.COPILOT_MODEL || DEFAULT_MODEL;
 let _feishuAuthorizedOpenId = raw.FEISHU_AUTHORIZED_OPEN_ID;
 
@@ -70,6 +91,13 @@ export const config = {
   },
   set copilotModel(model: string) {
     _copilotModel = model;
+  },
+  /**
+   * Model IDs that Max treats as vision-capable regardless of what the Copilot
+   * SDK reports. See `VISION_CAPABLE_MODEL_OVERRIDES` for the rationale.
+   */
+  get visionCapableModelOverrides(): ReadonlySet<string> {
+    return VISION_CAPABLE_MODEL_OVERRIDES;
   },
   get telegramEnabled(): boolean {
     return !!this.telegramBotToken && this.authorizedUserId !== undefined;
