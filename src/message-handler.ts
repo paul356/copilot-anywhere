@@ -819,9 +819,14 @@ export class MessageHandler {
             console.log(`[message-handler] Prompt → session ${session.sessionId.slice(0, 8)}… ws=${workspaceName} dir=${workingDir ?? "cwd"} channel=${channelId}`);
             console.log(`[message-handler] Prompt text (${routed.text.length} chars): ${routed.text.slice(0, 200)}`);
   
-            // Check model capabilities and filter attachments
+            // Check model capabilities and filter attachments.
+            // Always propagate the warning to the prompt so the LLM can relay
+            // it to the user when attachments were stripped (e.g. vision not
+            // supported). Without this the warning was silently dropped when
+            // every attachment got filtered, and the user only saw a confused
+            // "I don't see the image" reply.
             const { filtered: safeAttachments, warning } = await filterAttachments(routed.attachments ?? []);
-            const effectivePrompt = safeAttachments.length > 0 && warning
+            const effectivePrompt = warning
               ? routed.text + warning
               : routed.text;
             if (routed.attachments && routed.attachments.length > 0) {
