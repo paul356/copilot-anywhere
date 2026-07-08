@@ -43,7 +43,11 @@ export type MessageCallback = (text: string, done: boolean) => void;
 
 export interface MessageHandlerOptions {
   port: number;
-  getSessionForChannel: (channelId: string) => Promise<{ session: CopilotSession; workspaceName: string; workingDir?: string }>;
+  // wsName is the workspace captured at queue-entry time — NOT the current
+  // active workspace. Reading getActiveWorkspace() here would silently
+  // re-route work prompts to the max session (or vice-versa) if the user
+  // switched active ws while the queue item was waiting.
+  getSessionForChannel: (channelId: string, wsName: string) => Promise<{ session: CopilotSession; workspaceName: string; workingDir?: string }>;
   cliProcess: CLIProcess;
   defaultTimeoutMs?: number;
 }
@@ -59,7 +63,7 @@ export interface QueuedMessage {
 
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
-const LLM_HARD_TIMEOUT_MS = 5 * 60 * 1000; // 5 min cap on LLM call-to-response time
+const LLM_HARD_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour cap on LLM call-to-response time
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (legacy — no longer used for activity)
 const RECOVERABLE_PATTERNS = /connection|EADDR|ECONN|ETIMEDOUT|ENOTFOUND|socket hang up|pipe/i;
 const FATAL_TIMEOUT_PATTERNS = /LLM not responding|LLM call timed out|no activity/i;
@@ -537,7 +541,7 @@ export class MessageHandler {
   }
 
   /**
-   * Arm (or re-arm) the 1-hour hard timer for `qKey`. Pauses itself while a
+   * Arm (or re-arm) the hard timer for `qKey`. Pauses itself while a
    * pending ask_user is waiting on this qKey — so user response time is
    * unbounded. Called on every session event from processOne.
    */
@@ -550,7 +554,7 @@ export class MessageHandler {
     const t = setTimeout(() => {
       this.hardTimers.delete(qKey);
       this.hardTimerRejects.delete(qKey);
-      reject(new Error("LLM not responding (5 min timeout)"));
+      reject(new Error("LLM not responding (1 hour timeout)"));
     }, LLM_HARD_TIMEOUT_MS);
     this.hardTimers.set(qKey, t);
   }
@@ -818,7 +822,7 @@ export class MessageHandler {
         markPoolBusy(wsName);
         try {
           await this.handleWithRetry(channelId, wsName, async () => {
-            const { session, workspaceName, workingDir } = await this.options.getSessionForChannel(channelId);
+            const { session, workspaceName, workingDir } = await this.options.getSessionForChannel(channelId, wsName);
             console.log(`[message-handler] Prompt → session ${session.sessionId.slice(0, 8)}… ws=${workspaceName} dir=${workingDir ?? "cwd"} channel=${channelId}`);
             console.log(`[message-handler] Prompt text (${routed.text.length} chars): ${routed.text.slice(0, 200)}`);
   

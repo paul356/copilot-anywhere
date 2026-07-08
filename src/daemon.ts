@@ -143,8 +143,14 @@ async function main(): Promise<void> {
   messageHandler = new MessageHandler({
     port: config.copilotUiServerPort,
     cliProcess,
-    async getSessionForChannel(channelId: string) {
-      const wsName = getActiveWorkspace(channelId);
+    async getSessionForChannel(channelId: string, wsName: string) {
+      // CRITICAL: use the wsName captured at queue-entry time, NOT
+      // getActiveWorkspace(channelId). The active ws may have changed
+      // since the user sent the prompt (e.g. they switched to max while
+      // work was still running). Re-reading active here would route the
+      // work prompt to the max session, contaminating max's conversation
+      // history with work's content and labeling max's replies with
+      // work's [ws: tag].
       const wsRow = getWorkspace(wsName);
       const workingDir = wsRow?.working_dir;
       const session = await getOrCreateSession(wsName, config.copilotUiServerPort, {

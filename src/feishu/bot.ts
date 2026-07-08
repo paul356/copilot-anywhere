@@ -298,9 +298,9 @@ async function drainHeldMessages(openId: string, wsName: string, messageHandler:
       console.error("[feishu] drainHeldMessages error:", err);
 
       let userMessage: string;
-      if (/LLM not responding|5 min/i.test(errMsg)) {
+      if (/LLM not responding|5 min|1 hour|hour timeout/i.test(errMsg)) {
         userMessage =
-          "⏱️ LLM 5 分钟内无响应，已取消。\n" +
+          "⏱️ LLM 1 小时内无响应，已取消。\n" +
           "请重新发送您要处理的消息。";
       } else if (/cancelled|abort/i.test(errMsg)) {
         userMessage = "⛔ 当前请求已取消。";
@@ -946,9 +946,9 @@ export function createBot(messageHandler: MessageHandler): { client: Lark.Client
         console.error("[feishu] processMessage error:", err);
 
         let userMessage: string;
-        if (/LLM not responding|5 min/i.test(errMsg)) {
+        if (/LLM not responding|5 min|1 hour|hour timeout/i.test(errMsg)) {
           userMessage =
-            "⏱️ LLM 5 分钟内无响应，已取消。\n" +
+            "⏱️ LLM 1 小时内无响应，已取消。\n" +
             "下一条消息将作为新会话开始（之前的上下文已丢弃）。\n" +
             "如有重要内容请重新发送。";
         } else if (/cancelled|abort/i.test(errMsg)) {
