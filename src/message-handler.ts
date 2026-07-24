@@ -852,8 +852,9 @@ export class MessageHandler {
               if (t === "session.error") {
                 const msg = event?.data?.message ?? event?.message ?? "Unknown session error";
                 sessionError = msg;
-              }
-              if (t.includes("tool") || t.includes("permission") || t.includes("error") || t.includes("session.error")) {
+                // Log the full event data without truncation for debugging SDK-originated errors
+                console.log(`[message-handler] Event session.error (full): ${JSON.stringify(event)}`);
+              } else if (t.includes("tool") || t.includes("permission") || t.includes("error")) {
                 console.log(`[message-handler] Event ${t}: ${JSON.stringify(event).slice(0, 500)}`);
               }
             });
