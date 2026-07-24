@@ -58,19 +58,10 @@ let connectionCounter = 0;
 app.get("/status", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
-    workers: [], // pass-through mode — no agent workers
   });
 });
 
-// List agents (pass-through mode — no agents, always empty)
-app.get("/agents", (_req: Request, res: Response) => {
-  res.json([]);
-});
-
-// Keep /sessions as an alias for backwards compat
-app.get("/sessions", (_req: Request, res: Response) => {
-  res.json([]);
-});
+// Agents and sessions endpoints removed — Max uses pass-through architecture
 
 // SSE stream for real-time responses
 app.get("/stream", (req: Request, res: Response) => {

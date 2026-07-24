@@ -23,9 +23,6 @@ export const TUI_DEBUG_LOG_PATH = join(MAX_HOME, "tui-debug.log");
 /** Path to the API bearer token file */
 export const API_TOKEN_PATH = join(MAX_HOME, "api-token");
 
-/** Agent definition files (~/.max/agents/) */
-export const AGENTS_DIR = join(MAX_HOME, "agents");
-
 /** Root of the LLM-maintained wiki knowledge base */
 export const WIKI_DIR = join(MAX_HOME, "wiki");
 

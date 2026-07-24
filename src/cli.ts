@@ -18,7 +18,7 @@ function getVersion(): string {
 function printHelp(): void {
   const version = getVersion();
   console.log(`
-max v${version} — AI orchestrator powered by Copilot SDK
+max v${version} — AI assistant powered by Copilot SDK
 
 Usage:
   max <command>

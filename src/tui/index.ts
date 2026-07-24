@@ -842,7 +842,7 @@ function cmdHelp(): void {
   console.log(`    ${C.coral("/quit")}  ${C.coral("/exit")}          exit`);
   console.log();
   console.log(C.dim("    enter=submit  alt+enter=newline  esc=cancel"));
-  console.log(C.dim("    all other /commands are forwarded to the Copilot agent"));
+  console.log(C.dim("    all other /commands are forwarded to Copilot"));
   console.log(C.dim("    press escape to cancel a running response"));
   console.log(C.dim("    set MAX_TUI_DEBUG=1 to write lifecycle logs to ~/.max/tui-debug.log"));
   console.log();

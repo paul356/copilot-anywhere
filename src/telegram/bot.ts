@@ -154,8 +154,6 @@ export function createBot(messageHandler: MessageHandler): Bot {
         "/models — List all available models\n" +
         "/auto — Toggle auto model routing\n" +
         "/memory — Show stored memories\n" +
-        "/agents — List available agents\n" +
-        "/workers — Alias for /agents\n" +
         "/ws — Manage workspaces (directories)\n" +
         "/restart — Restart Max\n" +
         "/help — Show this help"
@@ -235,11 +233,6 @@ export function createBot(messageHandler: MessageHandler): Bot {
       await safeReply(ctx, lines.join("\n") + `\n\n${entries.length} wiki pages total`);
     }
   });
-  const agentCommandHandler = async (ctx: Context) => {
-    await ctx.reply("No workers running. (pass-through mode)");
-  };
-  bot.command("agents", agentCommandHandler);
-  bot.command("workers", agentCommandHandler);
   bot.command("restart", async (ctx) => {
     await ctx.reply("⏳ Restarting Max...");
     setTimeout(() => {

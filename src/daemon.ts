@@ -234,8 +234,6 @@ async function shutdown(): Promise<void> {
     process.exit(1);
   }
 
-  // Check for running workers before shutting down (pass-through mode — no workers)
-
   shutdownState = "shutting_down";
   console.log("\n[max] Shutting down... (Ctrl+C again to force)");
 

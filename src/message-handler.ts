@@ -178,7 +178,7 @@ async function modelSupportsVision(): Promise<boolean> {
 /**
  * Filter attachments against model capabilities.
  * - blob type attachments (images) require vision support
- * - file type attachments are always allowed (agent can read them)
+ * - file type attachments are always allowed
  *
  * Returns the filtered list and a warning message (empty string if all good).
  */
@@ -541,7 +541,7 @@ export class MessageHandler {
   }
 
   /**
-   * Arm (or re-arm) the hard timer for `qKey`. Pauses itself while a
+   * Arm (or re-arm) the 1-hour hard timer for `qKey`. Pauses itself while a
    * pending ask_user is waiting on this qKey — so user response time is
    * unbounded. Called on every session event from processOne.
    */

@@ -421,7 +421,6 @@
   <h4>Using Max</h4>
   <a href="#commands">Commands</a>
   <a href="#talking">Talking to Max</a>
-  <a href="#agents">Agents</a>
 
   <h4>Features</h4>
   <a href="#skills">Skills</a>
@@ -482,7 +481,6 @@
   <p><strong>What happens automatically on upgrade:</strong></p>
   <ul>
     <li>If you had SQLite-based memories from an earlier version, they are migrated into wiki pages on first launch and originals are archived.</li>
-    <li>Bundled agent definitions are synced — your customizations are preserved, only missing agents are added.</li>
     <li>No data is lost. Your Telegram config, model preferences, and wiki all carry forward.</li>
   </ul>
 </div>
@@ -515,7 +513,7 @@
 <table class="cmd-table">
   <thead><tr><th>Command</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td>max start</td><td>Start the Max daemon. Launches the orchestrator, HTTP API (port 7777), and Telegram bot (if configured).</td></tr>
+    <tr><td>max start</td><td>Start the Max daemon. Launches the message handler, HTTP API (port 7777), Telegram bot (if configured), and Feishu bot (if configured).</td></tr>
     <tr><td>max tui</td><td>Open the terminal UI. Connects to the running daemon via SSE for real-time streaming.</td></tr>
     <tr><td>max setup</td><td>Run the interactive setup wizard.</td></tr>
     <tr><td>max help</td><td>Show available commands.</td></tr>
@@ -541,7 +539,6 @@
     <tr><td>/model &lt;name&gt;</td><td>Switch to a different model</td><td><span class="tag tag-tui">TUI</span> <span class="tag tag-tg">TG</span></td></tr>
     <tr><td>/memory</td><td>Show the wiki index (everything Max has stored)</td><td><span class="tag tag-tui">TUI</span> <span class="tag tag-tg">TG</span></td></tr>
     <tr><td>/skills</td><td>List installed skills</td><td><span class="tag tag-tui">TUI</span> <span class="tag tag-tg">TG</span></td></tr>
-    <tr><td>/workers</td><td>List active agent tasks</td><td><span class="tag tag-tui">TUI</span> <span class="tag tag-tg">TG</span></td></tr>
     <tr><td>/restart</td><td>Restart the Max daemon</td><td><span class="tag tag-tui">TUI</span> <span class="tag tag-tg">TG</span></td></tr>
     <tr><td>/status</td><td>Daemon health check</td><td><span class="tag tag-tui">TUI</span></td></tr>
     <tr><td>/clear</td><td>Clear the terminal screen</td><td><span class="tag tag-tui">TUI</span></td></tr>
@@ -560,117 +557,15 @@
 <p>Anything that isn't a slash command gets sent to Max as a natural language message. Max decides how to handle it:</p>
 
 <ul>
-  <li><strong>Direct answer</strong> — simple questions, math, general knowledge</li>
-  <li><strong>Delegate to an agent</strong> — coding tasks go to <code>@coder</code>, design work to <code>@designer</code>, general tasks to <code>@general-purpose</code></li>
+  <li><strong>Direct answer</strong> — simple questions, math, general knowledge, file operations</li>
   <li><strong>Skill usage</strong> — if Max has a skill for it (email, calendar, etc.), he follows the skill's instructions</li>
   <li><strong>Skill learning</strong> — if Max doesn't know how, he researches available CLI tools and teaches himself</li>
 </ul>
 
-<p>You can also address agents directly with <code>@mentions</code>: <code>@coder fix the login bug</code> or <code>@designer make the landing page responsive</code>.</p>
-
-<p>Messages are tagged with their source channel — <code>[via telegram]</code> or <code>[via tui]</code> — so Max can adapt his response style. Telegram gets shorter responses; TUI gets more detail.</p>
+<p>Messages are tagged with their workspace — <code>[ws: my-project]</code> — so you always know which context Max is operating in. Telegram gets shorter responses; TUI gets more detail.</p>
 
 
-<h2 id="agents">Agents<span>.</span></h2>
-
-<p>Max delegates work to <strong>specialist agents</strong> — each one runs in its own Copilot CLI session with full tool access. Max acts as the orchestrator: he receives your messages, decides which agent should handle the work, and dispatches the task.</p>
-
-<h3>Built-in agents</h3>
-
-<table class="env-table">
-  <thead><tr><th>Agent</th><th>Default Model</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><code>@coder</code></td><td><code>gpt-5.4</code></td><td>Software engineering — implementation, debugging, refactoring, tests, deployment</td></tr>
-    <tr><td><code>@designer</code></td><td><code>claude-opus-4.6</code></td><td>UI/UX design — components, styling, layouts, mockups. Bundles the <code>frontend-design</code> skill.</td></tr>
-    <tr><td><code>@general-purpose</code></td><td><code>auto</code></td><td>Anything else — research, docs, data processing, system tasks. Model chosen per task.</td></tr>
-    <tr><td><code>@max</code></td><td><code>claude-sonnet-4.6</code></td><td>The orchestrator itself — routes tasks, answers simple questions, manages agents.</td></tr>
-  </tbody>
-</table>
-
-<h3>How to use agents</h3>
-
-<p>You can talk to agents in two ways:</p>
-
-<ul>
-  <li><strong>Let Max decide</strong> — just describe what you need and Max routes to the right agent automatically</li>
-  <li><strong>@mention directly</strong> — <code>@coder fix the auth bug in ~/dev/myapp</code> or <code>@designer make the header responsive</code></li>
-</ul>
-
-<p>Agent tasks run <strong>in the background</strong>. Max dispatches the task and responds immediately — you don't wait for the agent to finish. When the agent completes, Max relays the results. Multiple agents can work in parallel.</p>
-
-<div class="code-block">
-  <div class="code-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">conversation</span></div>
-  <div class="code-body"><span class="str">You:</span>  @coder Fix the auth bug in ~/dev/myapp
-<span class="flag">Max:</span>  On it — I've asked @coder to handle that.
-
-<span class="comment">  ...a few minutes later...</span>
-
-<span class="flag">Max:</span>  @coder finished. The token refresh wasn't catching
-      expired JWTs. Want me to push a PR?</div>
-</div>
-
-<h3>Agent definition files</h3>
-
-<p>Each agent is defined by a simple <code>.agent.md</code> file in <code>~/.max/agents/</code>. The file has YAML frontmatter for configuration and a markdown body for the system prompt:</p>
-
-<div class="code-block">
-  <div class="code-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">~/.max/agents/coder.agent.md</span></div>
-  <div class="code-body"><span class="comment">---</span>
-<span class="flag">name:</span> Coder
-<span class="flag">description:</span> Software engineering specialist
-<span class="flag">model:</span> gpt-5.4
-<span class="comment">---</span>
-
-You are Coder, a software engineering specialist.
-Read existing code before writing new code.
-Follow the project's existing patterns...
-</div>
-</div>
-
-<h3>Frontmatter fields</h3>
-
-<table class="env-table">
-  <thead><tr><th>Field</th><th>Required</th><th>Description</th></tr></thead>
-  <tbody>
-    <tr><td><code>name</code></td><td>Yes</td><td>Display name of the agent</td></tr>
-    <tr><td><code>description</code></td><td>Yes</td><td>Short description — shown in agent roster and help</td></tr>
-    <tr><td><code>model</code></td><td>Yes</td><td>Default model (<code>gpt-5.4</code>, <code>claude-sonnet-4.6</code>, <code>auto</code>, etc.)</td></tr>
-    <tr><td><code>skills</code></td><td>No</td><td>List of skills to load (e.g. <code>frontend-design</code>)</td></tr>
-    <tr><td><code>tools</code></td><td>No</td><td>Tool allowlist. Omit to give the agent all tools.</td></tr>
-    <tr><td><code>mcpServers</code></td><td>No</td><td>MCP servers to connect</td></tr>
-  </tbody>
-</table>
-
-<h3>Changing an agent's model</h3>
-
-<p>Edit the <code>model:</code> field in the agent's <code>.agent.md</code> file. For example, to switch <code>@coder</code> to Claude:</p>
-
-<div class="code-block">
-  <div class="code-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">~/.max/agents/coder.agent.md</span></div>
-  <div class="code-body"><span class="flag">model:</span> claude-sonnet-4.6</div>
-</div>
-
-<p>Set <code>model: auto</code> to let the orchestrator pick the best model per task. Changes take effect on the next agent session — no restart needed.</p>
-
-<h3>Creating custom agents</h3>
-
-<p>Ask Max to create one, or use the <code>create_agent</code> tool directly:</p>
-
-<div class="code-block">
-  <div class="code-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">conversation</span></div>
-  <div class="code-body"><span class="str">You:</span>  Create an agent called "reviewer" that does code reviews
-<span class="flag">Max:</span>  Done — created @reviewer at ~/.max/agents/reviewer.agent.md</div>
-</div>
-
-<p>Or create the file manually: add a <code>your-agent.agent.md</code> file to <code>~/.max/agents/</code> with the frontmatter format above.</p>
-
-<h3>Bundled agent updates</h3>
-
-<p>When Max updates, bundled agent definitions are synced automatically. If you've customized a built-in agent (edited the file), <strong>your changes are preserved</strong> — Max only overwrites agents that haven't been modified since the last sync. Built-in agents (<code>max</code>, <code>coder</code>, <code>designer</code>, <code>general-purpose</code>) cannot be deleted, but you can freely edit them.</p>
-
-<div class="callout">
-  <p><strong>Tip:</strong> Use <code>/workers</code> to see all running agent tasks, their status, and which agent is handling each one.</p>
-</div>
+<!-- Agents section removed — Max uses pass-through architecture with per-workspace sessions -->
 
 
 <!-- ─────────────────── FEATURES ─────────────────── -->
@@ -685,7 +580,7 @@ Follow the project's existing patterns...
 <h3>Learning new skills</h3>
 <p>When you ask Max to do something he doesn't know how to do, he'll:</p>
 <ol>
-  <li>Spin up a worker to research what CLI tools are available on your machine</li>
+  <li>Research what CLI tools are available on your machine</li>
   <li>Figure out how to accomplish the task</li>
   <li>Save the instructions as a SKILL.md so he remembers for next time</li>
   <li>Do the task</li>
@@ -728,7 +623,7 @@ Follow the project's existing patterns...
 <p>Ask Max to <em>"forget that"</em> and the <code>forget</code> tool picks the right surgery: removing a single line, rewriting a section of a synthesized entity page, or deleting a whole page. Use <code>/memory</code> to see the current wiki index.</p>
 
 <h3>Persistent session</h3>
-<p>Max maintains a single long-running orchestrator session using the Copilot SDK's <strong>infinite sessions</strong>. The SDK automatically compacts context in the background when it fills up, preserving important information. This means Max naturally remembers your conversation across messages — no manual history injection needed.</p>
+<p>Each workspace maintains its own Copilot SDK session using the SDK's <strong>infinite sessions</strong>. The SDK automatically compacts context in the background when it fills up, preserving important information across turns. Workspaces are managed via <code>/max:ws</code> commands — switch between projects without losing context.</p>
 
 <h3>Conversation log</h3>
 <p>All messages are logged to SQLite with their source channel (Telegram, TUI, background). This provides cross-channel awareness — if you tell Max something on Telegram, the TUI session knows about it too. The log is also what feeds the episodic writer.</p>
@@ -760,7 +655,7 @@ Follow the project's existing patterns...
 <table class="env-table">
   <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td>COPILOT_MODEL</td><td>claude-sonnet-4.6</td><td>Default LLM model for the orchestrator</td></tr>
+    <tr><td>COPILOT_MODEL</td><td>claude-sonnet-4.6</td><td>Default LLM model for the Copilot session</td></tr>
     <tr><td>API_PORT</td><td>7777</td><td>HTTP API port (1–65535)</td></tr>
     <tr><td>TELEGRAM_BOT_TOKEN</td><td>—</td><td>Bot token from @BotFather (optional)</td></tr>
     <tr><td>AUTHORIZED_USER_ID</td><td>—</td><td>Your Telegram numeric user ID (required if using Telegram)</td></tr>
@@ -794,13 +689,14 @@ Follow the project's existing patterns...
 <p>Max is a Node.js daemon process built on the <a href="https://github.com/github/copilot-sdk">GitHub Copilot SDK</a>. Here's the architecture:</p>
 
 <ul>
-  <li><strong>Daemon</strong> (<code>max start</code>) — the main process. Starts the SDK client, orchestrator, HTTP API, and Telegram bot.</li>
-  <li><strong>Orchestrator</strong> — a persistent Copilot session that receives all messages, decides what to do, and dispatches work. Runs in a single infinite session with automatic compaction.</li>
-  <li><strong>Agents</strong> — specialist Copilot CLI sessions (<code>@coder</code>, <code>@designer</code>, <code>@general-purpose</code>, and custom agents). Each has its own model, system prompt, and full tool access. Defined by <code>.agent.md</code> files in <code>~/.max/agents/</code>.</li>
+  <li><strong>Daemon</strong> (<code>max start</code>) — the main process. Starts the SDK client, message handler, HTTP API, Telegram bot, and Feishu bot.</li>
+  <li><strong>Message Handler</strong> — unified engine that queues, processes, and streams all messages across channels and workspaces. Manages per-channel serial queues, 1-hour hard timeout, retry logic, and ask_user delegation.</li>
+  <li><strong>Workspace Sessions</strong> — each workspace gets its own Copilot SDK session with its own working directory. Switch between projects via <code>/max:ws switch</code> without losing context. A pool manager enforces a max concurrency limit and evicts idle workspaces via LRU.</li>
   <li><strong>HTTP API</strong> — Express server on port 7777. The TUI connects via SSE for streaming; slash commands hit REST endpoints.</li>
   <li><strong>TUI</strong> (<code>max tui</code>) — a readline-based terminal interface that connects to the daemon's SSE stream.</li>
-  <li><strong>Telegram Bot</strong> — Grammy-based bot that forwards messages to the orchestrator and relays responses.</li>
-  <li><strong>SQLite</strong> — stores agent task state, conversation log, and daemon state at <code>~/.max/max.db</code>. Long-term knowledge lives in the wiki at <code>~/.max/wiki/</code>, not in SQLite.</li>
+  <li><strong>Telegram Bot</strong> — Grammy-based bot that forwards messages to the daemon and relays responses.</li>
+  <li><strong>Feishu Bot</strong> — Lark SDK-based bot with WebSocket event dispatcher. Supports P2P text, image, and file messages. Card-based interactive questions for ask_user.</li>
+  <li><strong>SQLite</strong> — stores workspace state, conversation log, message deduplication, and daemon state at <code>~/.max/max.db</code>. Long-term knowledge lives in the wiki at <code>~/.max/wiki/</code>, not in SQLite.</li>
 </ul>
 
 <p>All data lives in <code>~/.max/</code>:</p>
@@ -808,7 +704,6 @@ Follow the project's existing patterns...
   <div class="code-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">~/.max/</span></div>
   <div class="code-body"><span class="cmd">.env</span>          <span class="comment"># configuration</span>
 <span class="cmd">max.db</span>        <span class="comment"># SQLite database</span>
-<span class="cmd">agents/</span>       <span class="comment"># agent definitions (.agent.md files)</span>
 <span class="cmd">sessions/</span>     <span class="comment"># Copilot SDK session state</span>
 <span class="cmd">skills/</span>       <span class="comment"># learned skills (SKILL.md files)</span>
 <span class="cmd">wiki/</span>         <span class="comment"># personal wiki knowledge base</span></div>
@@ -820,9 +715,9 @@ Follow the project's existing patterns...
 <p>Max is built on the <a href="https://github.com/github/copilot-sdk">GitHub Copilot SDK</a> (<code>@github/copilot-sdk</code>). Key SDK features Max uses:</p>
 
 <ul>
-  <li><strong>Infinite sessions</strong> — automatic context compaction at 80% utilization, blocking at 95%. Max's orchestrator runs in a single persistent session that never runs out of context.</li>
+  <li><strong>Infinite sessions</strong> — automatic context compaction at 80% utilization, blocking at 95%. Each workspace runs in its own persistent session that never runs out of context.</li>
   <li><strong>Session resume</strong> — <code>resumeSession()</code> lets Max pick up where he left off after a restart, preserving conversation history.</li>
-  <li><strong>Tool system</strong> — Max's built-in tools (remember, recall, workers, model switching, etc.) are defined via <code>defineTool()</code> with Zod schemas.</li>
+  <li><strong>Tool system</strong> — Max's built-in tools (remember, recall, wiki CRUD, model switching, etc.) are defined via <code>defineTool()</code> with Zod schemas.</li>
   <li><strong>Streaming</strong> — real-time response streaming via <code>assistant.message_delta</code> events.</li>
   <li><strong>MCP servers</strong> — Max can connect to MCP tool servers for extended capabilities.</li>
   <li><strong>Skill directories</strong> — the SDK discovers and loads SKILL.md files from configured directories.</li>

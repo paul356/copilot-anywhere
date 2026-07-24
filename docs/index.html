@@ -924,8 +924,8 @@
       </div>
       <div class="tui-body">
         <div class="tui-msg"><span class="tui-who you">you</span><span class="tui-text">Fix the auth bug in ~/dev/myapp</span></div>
-        <div class="tui-msg"><span class="tui-who max">max</span><span class="tui-text">On it — spinning up a worker now.</span></div>
-        <div class="tui-msg"><span class="tui-who sys">sys</span><span class="tui-text"><code>[background]</code> auth-fix complete.</span></div>
+        <div class="tui-msg"><span class="tui-who max">max</span><span class="tui-text">Let me look at that repo.</span></div>
+        <div class="tui-msg"><span class="tui-who max">max</span><span class="tui-text">Found it — the JWT refresh wasn't catching expired tokens. Fixed in <code>auth.ts</code>. Push a PR?</span></div>
         <div class="tui-msg"><span class="tui-who max">max</span><span class="tui-text"><strong>Auth bug fixed.</strong> Expired JWT wasn't catching re-auth. Push a PR?</span></div>
         <div class="tui-divider"></div>
         <div class="tui-msg"><span class="tui-who you">you</span><span class="tui-text">Can you control my Kasa smart lights?</span></div>
@@ -969,7 +969,7 @@
       <span class="what-item-number">03</span>
       <div class="what-item-content">
         <h3>Codes while you're away</h3>
-        <p><strong>Max spins up real Copilot CLI sessions</strong> as workers. Dispatches tasks, works on your repos, and reports back to your phone. You can be walking your dog and a bug gets fixed.</p>
+        <p><strong>Max runs real Copilot sessions</strong> that can edit files, run commands, and push code. Tell him what to do and he gets it done — whether you're at your desk or on your phone.</p>
       </div>
     </div>
     <div class="what-item fade-in">
@@ -996,8 +996,8 @@
     <div class="what-item fade-in">
       <span class="what-item-number">07</span>
       <div class="what-item-content">
-        <h3>Specialist agents</h3>
-        <p><strong>Max delegates to specialist agents.</strong> <code>@coder</code> for implementation tasks, <code>@designer</code> for UI/UX work, or <code>@general-purpose</code> for anything else. Each runs in its own Copilot session with full tool access. Create your own agents with a simple markdown file.</p>
+        <h3>Multi-workspace</h3>
+        <p><strong>Max keeps separate conversations per project.</strong> Each workspace gets its own Copilot session with its own working directory. Switch between projects with <code>/max:ws switch</code> without losing context.</p>
       </div>
     </div>
   </div>
@@ -1025,7 +1025,7 @@
 <section class="arch">
   <h2>How it works<span>.</span></h2>
   <div class="arch-svg-wrap fade-in">
-    <svg viewBox="0 0 1100 520" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Max architecture: Telegram and Terminal connect to the orchestrator with Copilot CLI workers, powered by GitHub Copilot SDK">
+    <svg viewBox="0 0 1100 520" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Max architecture: Telegram and Terminal connect to the daemon with per-workspace Copilot sessions, powered by GitHub Copilot SDK">
 
       <!-- Telegram node (left) -->
       <rect x="30" y="68" width="200" height="140" rx="18" fill="rgba(14,165,233,0.04)" stroke="#0ea5e9" stroke-width="2"/>
@@ -1052,27 +1052,27 @@
 
       <!-- Max header -->
       <text x="705" y="82" text-anchor="middle" font-family="Space Mono, monospace" font-size="40" font-weight="700" fill="#111827">max<tspan fill="#ff7f50">.</tspan></text>
-      <text x="705" y="118" text-anchor="middle" font-family="Space Mono, monospace" font-size="13" fill="rgba(17,24,39,0.22)" letter-spacing="0.16em">ORCHESTRATOR · MEMORY · SKILLS</text>
+      <text x="705" y="118" text-anchor="middle" font-family="Space Mono, monospace" font-size="13" fill="rgba(17,24,39,0.22)" letter-spacing="0.16em">DAEMON · MEMORY · SKILLS</text>
 
       <line x1="385" y1="142" x2="1025" y2="142" stroke="rgba(17,24,39,0.06)" stroke-width="1"/>
 
-      <!-- Workers label -->
-      <text x="390" y="180" font-family="Space Mono, monospace" font-size="13" fill="rgba(17,24,39,0.22)" letter-spacing="0.14em">AGENTS</text>
+      <!-- Workspaces label -->
+      <text x="390" y="180" font-family="Space Mono, monospace" font-size="13" fill="rgba(17,24,39,0.22)" letter-spacing="0.14em">WORKSPACES</text>
 
-      <!-- Worker 1 -->
+      <!-- Workspace 1 -->
       <rect x="390" y="196" width="190" height="90" rx="16" fill="rgba(14,165,233,0.04)" stroke="#0ea5e9" stroke-width="1.5"/>
-      <text x="485" y="238" text-anchor="middle" font-family="Space Mono, monospace" font-size="18" font-weight="700" fill="#0ea5e9">@coder</text>
-      <text x="485" y="266" text-anchor="middle" font-family="Space Mono, monospace" font-size="12" fill="rgba(14,165,233,0.4)">Copilot CLI</text>
+      <text x="485" y="238" text-anchor="middle" font-family="Space Mono, monospace" font-size="16" font-weight="700" fill="#0ea5e9">default</text>
+      <text x="485" y="266" text-anchor="middle" font-family="Space Mono, monospace" font-size="12" fill="rgba(14,165,233,0.4)">Copilot Session</text>
 
-      <!-- Worker 2 -->
+      <!-- Workspace 2 -->
       <rect x="600" y="196" width="190" height="90" rx="16" fill="rgba(14,165,233,0.04)" stroke="#0ea5e9" stroke-width="1.5"/>
-      <text x="695" y="238" text-anchor="middle" font-family="Space Mono, monospace" font-size="18" font-weight="700" fill="#0ea5e9">@designer</text>
-      <text x="695" y="266" text-anchor="middle" font-family="Space Mono, monospace" font-size="12" fill="rgba(14,165,233,0.4)">Copilot CLI</text>
+      <text x="695" y="238" text-anchor="middle" font-family="Space Mono, monospace" font-size="16" font-weight="700" fill="#0ea5e9">my-project</text>
+      <text x="695" y="266" text-anchor="middle" font-family="Space Mono, monospace" font-size="12" fill="rgba(14,165,233,0.4)">Copilot Session</text>
 
-      <!-- Worker 3 -->
+      <!-- Workspace 3 -->
       <rect x="810" y="196" width="190" height="90" rx="16" fill="rgba(14,165,233,0.04)" stroke="#0ea5e9" stroke-width="1.5"/>
-      <text x="905" y="238" text-anchor="middle" font-family="Space Mono, monospace" font-size="18" font-weight="700" fill="#0ea5e9">@yours</text>
-      <text x="905" y="266" text-anchor="middle" font-family="Space Mono, monospace" font-size="12" fill="rgba(14,165,233,0.4)">Copilot CLI</text>
+      <text x="905" y="238" text-anchor="middle" font-family="Space Mono, monospace" font-size="16" font-weight="700" fill="#0ea5e9">another-proj</text>
+      <text x="905" y="266" text-anchor="middle" font-family="Space Mono, monospace" font-size="12" fill="rgba(14,165,233,0.4)">Copilot Session</text>
 
       <!-- SDK foundation -->
       <rect x="390" y="326" width="610" height="144" rx="18" fill="rgba(255,127,80,0.04)" stroke="#ff7f50" stroke-width="1.5"/>
@@ -1090,7 +1090,7 @@
 <section class="powered" id="powered">
   <div class="powered-header">
     <h2>Built on Copilot<span>.</span></h2>
-    <p>Max isn't a wrapper around an API. He's built directly on the <a href="https://github.com/github/copilot-sdk">GitHub Copilot SDK</a> — the same platform that powers Copilot in VS Code, the terminal, and GitHub.com. Every worker session is a real <a href="https://github.com/features/copilot/cli/">Copilot CLI</a> instance. Works with your existing Copilot subscription — no new accounts needed.</p>
+    <p>Max isn't a wrapper around an API. He's built directly on the <a href="https://github.com/github/copilot-sdk">GitHub Copilot SDK</a> — the same platform that powers Copilot in VS Code, the terminal, and GitHub.com. Every conversation runs as a real Copilot session with full tool access. Works with your existing Copilot subscription — no new accounts needed.</p>
   </div>
   <div class="powered-cols fade-in">
     <div class="powered-col">
@@ -1101,8 +1101,8 @@
     </div>
     <div class="powered-col">
       <h3>Copilot CLI</h3>
-      <p><strong>Every worker is a full Copilot CLI.</strong> That means real file editing, terminal commands, git operations, code search — the same agent that runs in your terminal, orchestrated by Max.</p>
-      <p>Because Max builds on this mature agent harness, workers come pre-loaded with a full toolkit — no extra setup required:</p>
+      <p><strong>Every session is a full Copilot CLI.</strong> That means real file editing, terminal commands, git operations, code search — the same AI that runs in your terminal, available from anywhere.</p>
+      <p>Each session comes pre-loaded with a full toolkit — no extra setup required:</p>
       <ul style="font-family:var(--sans);font-size:0.92rem;color:var(--gray);line-height:2;margin-top:0.75rem;padding-left:1.25rem;list-style:none;">
         <li style="display:flex;gap:0.5rem;"><span style="color:var(--coral);flex-shrink:0;">→</span> File read / write / edit</li>
         <li style="display:flex;gap:0.5rem;"><span style="color:var(--coral);flex-shrink:0;">→</span> Bash &amp; terminal execution</li>
@@ -1121,7 +1121,7 @@
 <section class="tools-section">
   <div class="tools-header">
     <h3>Built-in tools<span>.</span></h3>
-    <p>Max ships with tools for orchestration, skills, and self-management. Extend with skills from skills.sh.</p>
+    <p>Max ships with tools for memory, skills, and self-management. Extend with skills from skills.sh.</p>
   </div>
   <div class="tools-list">
     <div class="tool-cell fade-in">
@@ -1131,10 +1131,6 @@
     <div class="tool-cell fade-in">
       <h4>Wiki Tools <code>wiki_search</code> <code>wiki_read</code> <code>wiki_update</code> <code>wiki_ingest</code> <code>wiki_lint</code></h4>
       <p>Full CRUD over the wiki. A ranked index is injected into context every message; Max drills in with <code>wiki_read</code>. Ingest URLs or docs as sources, and lint for broken links or orphan pages. Daily conversation summaries are written automatically.</p>
-    </div>
-    <div class="tool-cell fade-in">
-      <h4>Agents <code>delegate_to_agent</code></h4>
-      <p>Delegate tasks to specialist agents — <code>@coder</code>, <code>@designer</code>, <code>@general-purpose</code>, or your own. Each runs in its own Copilot session. Use <code>@mentions</code> or let Max route automatically.</p>
     </div>
     <div class="tool-cell fade-in">
       <h4>Machine Sessions <code>list_machine</code></h4>
@@ -1147,10 +1143,6 @@
     <div class="tool-cell fade-in">
       <h4>Model Switching <code>switch_model</code></h4>
       <p>Switch between any model in your Copilot subscription — Claude, GPT, Gemini, and more. Just ask. Persisted across restarts.</p>
-    </div>
-    <div class="tool-cell fade-in">
-      <h4>Agent Management <code>create_agent</code> <code>remove_agent</code></h4>
-      <p>Create custom agents with a markdown file — set the name, description, model, and system prompt. Bundled agents auto-sync on updates; your customizations are preserved.</p>
     </div>
     <div class="tool-cell fade-in">
       <h4>Self-Management <code>restart_max</code></h4>
