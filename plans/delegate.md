@@ -354,7 +354,7 @@ Delegate 参数全部可选——缺失时 Max 正常启动，只是 delegate �
 | `MAX_DELEGATE_MODEL` | （未设置） | Delegate 使用的模型。**必须三个一起设**才能启用。建议比执行模型更强的 reasoning 模型。 |
 | `MAX_DELEGATE_API_KEY` | （未设置） | Delegate 模型的 API key |
 | `MAX_DELEGATE_BASE_URL` | （未设置） | Delegate 模型的 API endpoint |
-| `MAX_DELEGATE_PROVIDER_TYPE` | `openai` | Delegate 模型的 API 协议。`openai`（/chat/completions + Bearer）或 `anthropic`（/messages + x-api-key）。 |
+| `MAX_DELEGATE_TYPE` | `openai` | Delegate LLM 的 API 协议。`openai`（/chat/completions + Bearer）或 `anthropic`（/messages + x-api-key）。 |
 | `MAX_DELEGATE_PROMPT_LENGTH` | 400 | 软引导参数。在 system prompt 中提示 Delegate "保持简短"，不截断。 |
 | `MAX_DELEGATE_MAX_ITERATIONS` | 20 | 最大自动循环轮数 |
 | `MAX_DELEGATE_VERBOSE` | `false` | 是否显示 "继续中…" 等过程消息 |

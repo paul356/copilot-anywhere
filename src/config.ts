@@ -21,7 +21,7 @@ const configSchema = z.object({
   MAX_DELEGATE_MODEL: z.string().min(1).optional(),
   MAX_DELEGATE_API_KEY: z.string().min(1).optional(),
   MAX_DELEGATE_BASE_URL: z.string().min(1).optional(),
-  MAX_DELEGATE_PROVIDER_TYPE: z.string().min(1).optional(),
+  MAX_DELEGATE_TYPE: z.string().min(1).optional(),
   MAX_DELEGATE_PROMPT_LENGTH: z.string().optional(),
   MAX_DELEGATE_MAX_ITERATIONS: z.string().optional(),
   MAX_DELEGATE_VERBOSE: z.string().optional(),
@@ -140,7 +140,7 @@ export const config = {
     return !!this.delegateModel && !!this.delegateApiKey && !!this.delegateBaseUrl;
   },
   get delegateProviderType(): string {
-    return raw.MAX_DELEGATE_PROVIDER_TYPE || "openai";
+    return raw.MAX_DELEGATE_TYPE || "openai";
   },
   get delegatePromptLength(): number {
     const v = raw.MAX_DELEGATE_PROMPT_LENGTH;

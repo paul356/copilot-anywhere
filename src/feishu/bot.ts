@@ -426,17 +426,12 @@ async function processMessage(
     if (done) {
       if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
       if (responseText) {
-        latestContent = responseText;
-        // Send immediately — don't rely on the outer flush (which only runs once).
-        // This is critical for delegate-enqueued prompts whose callbacks fire
-        // after processMessage's outer scope has already returned.
-        const unsent = latestContent.slice(sentLength);
-        if (unsent) {
-          sendChunkedReply(messageId, chatId, unsent).catch(() => {});
-          sentLength = latestContent.length;
-        }
+        // Send the full response — do NOT compute unsent via sentLength.
+        // sentLength accumulates across delegate-enqueued prompts that share
+        // the same callback closure, causing partial text loss.
+        sendChunkedReply(messageId, chatId, responseText).catch(() => {});
       }
-      return; // caller sends the remainder
+      return;
     }
     if (!responseText) return;
     const question = tryParseQuestion(responseText);

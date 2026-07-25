@@ -164,7 +164,7 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
       delegateStore.enter(wsKey, goal);
       return {
         reply: `✅ 已进入委托模式。\n目标：${goal}\n\n可随时用 /max:delegate goal <新目标> 更新目标，或用 /max:delegate end 退出。`,
-        delegateStartPrompt: goal,
+        delegateStartPrompt: `当前目标是：${goal}。请忽略之前的对话，独立完成这个任务。`,
         delegateStartOnlyIfIdle: true,
       };
     }
@@ -177,7 +177,7 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
     delegateStore.enter(wsKey, goal);
     return {
       reply: `✅ 已进入委托模式。\n目标：${goal}\n\n可随时用 /max:delegate goal <新目标> 更新目标，或用 /max:delegate end 退出。`,
-      delegateStartPrompt: goal,
+      delegateStartPrompt: `当前目标是：${goal}。请忽略之前的对话，独立完成这个任务。`,
     };
   },
 
