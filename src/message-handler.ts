@@ -975,6 +975,7 @@ export class MessageHandler {
 
         // ── Delegate check (after Copilot responds) ──────────────
         if (config.delegateEnabled && delegateStore.isActive(qKey)) {
+          console.log(`[delegate] Hook triggered after prompt ws=${wsName}`);
           await this.runDelegateOnce(channelId, wsName, qKey, callback);
         }
         } finally {
@@ -1046,6 +1047,7 @@ export class MessageHandler {
   ): Promise<void> {
     const maxIterations = config.delegateMaxIterations;
     const iterCount = delegateStore.incrementIteration(qKey);
+    console.log(`[delegate] runDelegateOnce ws=${wsName} iter=${iterCount}/${maxIterations}`);
     if (iterCount > maxIterations) {
       console.warn(`[delegate] Max iterations (${maxIterations}) reached for ws=${wsName}`);
       callback("⚠️ Delegate: 已达到最大循环次数，已退出委托模式。", true, { source: "delegate" });
@@ -1061,6 +1063,8 @@ export class MessageHandler {
     const lines = output.split("\n");
     const firstLine = lines[0]?.trim() ?? "";
     const rest = lines.slice(1).join("\n").trim();
+
+    console.log(`[delegate] check() raw output (${output.length}ch): firstLine="${firstLine}" rest="${rest.slice(0, 80)}"`);
 
     if (firstLine === "完成") {
       console.log(`[delegate] Goal achieved for ws=${wsName}: ${rest || goal}`);

@@ -215,6 +215,8 @@ export async function check(goal: string, conversation: string): Promise<string>
     "",
     "Instructions:",
     "- First line must be exactly '完成' (goal achieved) or '继续' (still in progress).",
+    "- If the goal was a question and the AI has already provided the answer, output '完成' — the goal is achieved.",
+    "- If the AI's response already addresses the user's original request, output '完成'.",
     "- If '完成': second line onward briefly informs the user the goal is done.",
     "- If '继续': second line onward is a prompt for the AI assistant — list what tasks remain.",
     "- Keep the prompt under " + promptLength + " tokens. Be concise.",
@@ -231,6 +233,7 @@ export async function check(goal: string, conversation: string): Promise<string>
       console.warn(`[delegate] check() unexpected first line: "${firstLine}", falling back to "继续"`);
       return "继续\n请继续之前的目标。";
     }
+    console.log(`[delegate] check() verdict=${firstLine} (${result.length}ch)`);
     return result;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

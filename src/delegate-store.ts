@@ -13,6 +13,7 @@ export interface DelegateEntry {
   goal: string;
   iterationCount: number;
   status: "active" | "completed" | "exited";
+  lastContinuePrompt?: string;
 }
 
 export type DelegateStatus = { status: string; goal: string };
@@ -74,4 +75,20 @@ export function incrementIteration(wsKey: string): number {
   if (!entry) return -1;
   entry.iterationCount++;
   return entry.iterationCount;
+}
+
+/**
+ * Record the last "继续" prompt text for dedup detection.
+ * If the same prompt is produced twice in a row, treat the goal as achieved.
+ */
+export function setLastContinuePrompt(wsKey: string, prompt: string): void {
+  const entry = store.get(wsKey);
+  if (entry) entry.lastContinuePrompt = prompt;
+}
+
+/**
+ * Returns the last "继续" prompt text, or empty string if none.
+ */
+export function getLastContinuePrompt(wsKey: string): string {
+  return store.get(wsKey)?.lastContinuePrompt ?? "";
 }
