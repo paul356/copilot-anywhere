@@ -422,14 +422,15 @@ async function processMessage(
     onEarlySend(true);   // reset the 3-min thinking timer
   };
 
-  await messageHandler.handle(routed, channelKey, (responseText: string, done: boolean) => {
+  await messageHandler.handle(routed, channelKey, (responseText: string, done: boolean, meta?: { source: string }) => {
     if (done) {
       if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
-      if (responseText) {
-        // Send the full response — do NOT compute unsent via sentLength.
-        // sentLength accumulates across delegate-enqueued prompts that share
-        // the same callback closure, causing partial text loss.
-        sendChunkedReply(messageId, chatId, responseText).catch((err) => {
+      // session.idle fires callback("", true) — text is accumulated in latestContent
+      // from streaming deltas. Prefer responseText if non-empty, fall back to latestContent.
+      const content = responseText || latestContent;
+      if (content) {
+        const tagged = tagSource(content, meta?.source);
+        sendChunkedReply(messageId, chatId, tagged).catch((err) => {
           console.error(`[feishu] Failed to send done response: ${err instanceof Error ? err.message : String(err)}`);
         });
       }
@@ -497,6 +498,16 @@ function isDuplicate(messageId: string): boolean {
   }
   markMessageProcessed(messageId);
   return false;
+}
+
+/** Prefix text with source tag so the user can distinguish who sent it. */
+function tagSource(text: string, source?: string): string {
+  switch (source) {
+    case "delegate":        return `✅ Delegate:\n${text}`;
+    case "delegate-prompt": return `📋 Delegate → Copilot:\n${text}`;
+    case "delegate-status": return `📋 Delegate:\n${text}`;
+    default:                return text; // copilot or no tag — no prefix
+  }
 }
 
 async function sendChunkedReply(
