@@ -429,7 +429,9 @@ async function processMessage(
         // Send the full response — do NOT compute unsent via sentLength.
         // sentLength accumulates across delegate-enqueued prompts that share
         // the same callback closure, causing partial text loss.
-        sendChunkedReply(messageId, chatId, responseText).catch(() => {});
+        sendChunkedReply(messageId, chatId, responseText).catch((err) => {
+          console.error(`[feishu] Failed to send done response: ${err instanceof Error ? err.message : String(err)}`);
+        });
       }
       return;
     }
