@@ -173,8 +173,8 @@ export function getRecentConversation(limit = 20): string {
   rows.reverse();
 
   return rows.map((r) => {
-    const tag = r.role === "user" ? `[${r.source}] User`
-      : r.role === "system" ? `[${r.source}] System`
+    const tag = r.role === "user" ? "User"
+      : r.role === "system" ? "System"
       : "Max";
     // Truncate long messages to keep context manageable
     const content = r.content.length > 1500 ? r.content.slice(0, 1500) + "…" : r.content;

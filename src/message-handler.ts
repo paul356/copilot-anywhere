@@ -21,7 +21,7 @@
 import { CopilotSession } from "@github/copilot-sdk";
 import { RoutedMessage, executeMaxCommand, type Attachment } from "./command-router.js";
 import { CLIProcess } from "./cli-process.js";
-import { getActiveWorkspace } from "./store/db.js";
+import { getActiveWorkspace, logConversation } from "./store/db.js";
 import { getClient } from "./copilot/client.js";
 import { invalidateSession, markPoolBusy, markPoolIdle } from "./copilot-client.js";
 import { config } from "./config.js";
@@ -122,19 +122,23 @@ function wrapCallbackWithWorkspaceTag(
 ): MessageCallback {
   const tag = buildWorkspaceTag(wsName);
   if (!tag) return rawCallback;
-  return (text: string, done: boolean) => {
+  return (text: string, done: boolean, meta?: { source: "copilot" | "delegate" | "delegate-prompt" | "delegate-status" }) => {
     if (!text) {
-      // Pure "done" signal with no content (e.g. the final session.idle
-      // callback). Pass through untouched.
-      rawCallback(text, done);
+      rawCallback(text, done, meta);
       return;
     }
     // ask_user JSON envelopes must reach the channel untouched.
     if (text.startsWith('{"type":"question"')) {
-      rawCallback(text, done);
+      rawCallback(text, done, meta);
       return;
     }
-    rawCallback(tag + text, done);
+    // Delegate messages have their own prefix (✅ Delegate: / 📋 Delegate → Copilot:).
+    // Adding the workspace tag on top would be redundant.
+    if (meta?.source && meta.source !== "copilot") {
+      rawCallback(text, done, meta);
+      return;
+    }
+    rawCallback(tag + text, done, meta);
   };
 }
 
@@ -915,13 +919,17 @@ export class MessageHandler {
                     });
                     cleanupFns.push(unsubDelta);
   
+                    // Log both sides of the conversation so delegate can see them
+                    logConversation("user", routed.text, "message-handler");
+  
                     const unsubIdle = session.on("session.idle", () => {
                       if (sessionError) {
                         reject(new Error(sessionError));
                         return;
                       }
+                      logConversation("assistant", fullText, `copilot:${workspaceName}`);
                       console.log(`[message-handler] Prompt response (${Date.now() - t0}ms, ${fullText.length} chars): ${fullText.slice(0, 300)}`);
-                      callback("", true);
+                      callback(fullText, true);
                       resolve(fullText);
                     });
                     cleanupFns.push(unsubIdle);

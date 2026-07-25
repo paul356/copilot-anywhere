@@ -424,17 +424,14 @@ async function processMessage(
 
   await messageHandler.handle(routed, channelKey, (responseText: string, done: boolean, meta?: { source: string }) => {
     if (done) {
-      if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
-      // session.idle fires callback("", true) — text is accumulated in latestContent
-      // from streaming deltas. Prefer responseText if non-empty, fall back to latestContent.
-      const content = responseText || latestContent;
-      if (content) {
-        const tagged = tagSource(content, meta?.source);
-        sendChunkedReply(messageId, chatId, tagged).catch((err) => {
-          console.error(`[feishu] Failed to send done response: ${err instanceof Error ? err.message : String(err)}`);
-        });
-      }
-      return;
+        if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
+        // responseText is now the full text (message-handler passes fullText on idle).
+        if (responseText) {
+          sendChunkedReply(messageId, chatId, tagSource(responseText, meta?.source)).catch((err) => {
+            console.error(`[feishu] Failed to send done response: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
+        return;
     }
     if (!responseText) return;
     const question = tryParseQuestion(responseText);
