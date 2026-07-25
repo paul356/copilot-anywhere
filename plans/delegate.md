@@ -98,7 +98,7 @@ Delegate 的 system prompt 明确要求：**指出还差哪些任务没完成、
 
 ```
 /max:delegate                          → 从聊天历史提取目标，进入委托模式
-/max:delegate <自由描述目标>              → 直接使用描述文本，进入委托模式
+/max:delegate goal <自由描述目标>        → 直接使用描述文本，进入委托模式
 /max:delegate end                       → 退出委托模式
 /max:delegate status                    → 查看当前 workspace 是否处于 delegate 模式及目标
 /max:status                              → 输出中附带 delegate 状态行
@@ -116,7 +116,7 @@ Delegate 的 system prompt 明确要求：**指出还差哪些任务没完成、
 | 调用 | 行为 |
 |------|------|
 | `/max:delegate` | 从历史提取目标 → 确认 → 开始监控 |
-| `/max:delegate <新目标>` | **直接覆盖**当前目标，不需要用户确认（显式提供=用户已知） |
+| `/max:delegate goal <新目标>` | **直接覆盖**当前目标，不需要用户确认（显式提供=用户已知） |
 | `/max:delegate end` | 退出委托模式 |
 | `/max:delegate status` | 显示当前 workspace 的委托状态（active / completed / exited）及目标文本 |
 
@@ -172,7 +172,7 @@ Delegate 的 system prompt 明确要求：**指出还差哪些任务没完成、
 ③ 循环: 步骤②不断重复，直到目标达成或达到最大轮数
 
 ④ 用户可随时:
-   /max:delegate <新目标>     → 更新目标
+   /max:delegate goal <新目标>     → 更新目标
    /max:delegate end           → 退出（后续不检查）
    /max:delegate status        → 查看状态
    /max:status                 → 输出包含 delegate 状态行
@@ -354,6 +354,7 @@ Delegate 参数全部可选——缺失时 Max 正常启动，只是 delegate �
 | `MAX_DELEGATE_MODEL` | （未设置） | Delegate 使用的模型。**必须三个一起设**才能启用。建议比执行模型更强的 reasoning 模型。 |
 | `MAX_DELEGATE_API_KEY` | （未设置） | Delegate 模型的 API key |
 | `MAX_DELEGATE_BASE_URL` | （未设置） | Delegate 模型的 API endpoint |
+| `MAX_DELEGATE_PROVIDER_TYPE` | `openai` | Delegate 模型的 API 协议。`openai`（/chat/completions + Bearer）或 `anthropic`（/messages + x-api-key）。 |
 | `MAX_DELEGATE_PROMPT_LENGTH` | 400 | 软引导参数。在 system prompt 中提示 Delegate "保持简短"，不截断。 |
 | `MAX_DELEGATE_MAX_ITERATIONS` | 20 | 最大自动循环轮数 |
 | `MAX_DELEGATE_VERBOSE` | `false` | 是否显示 "继续中…" 等过程消息 |

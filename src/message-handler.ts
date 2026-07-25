@@ -28,6 +28,9 @@ import { config } from "./config.js";
 import { appendFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import * as delegateStore from "./delegate-store.js";
+import { check as delegateCheck } from "./delegate.js";
+import { getRecentConversation } from "./store/db.js";
 
 const MH_DBG_LOG = join(homedir(), ".max", "feishu-debug.log");
 function mhDbg(...args: unknown[]): void {
@@ -39,7 +42,7 @@ function mhDbg(...args: unknown[]): void {
 
 // ── Types ──────────────────────────────────────────────────────────
 
-export type MessageCallback = (text: string, done: boolean) => void;
+export type MessageCallback = (text: string, done: boolean, meta?: { source: "copilot" | "delegate" | "delegate-prompt" | "delegate-status" }) => void;
 
 export interface MessageHandlerOptions {
   port: number;
@@ -949,6 +952,11 @@ export class MessageHandler {
               }
             })();
         });
+
+        // ── Delegate check (after Copilot responds) ──────────────
+        if (config.delegateEnabled && delegateStore.isActive(qKey)) {
+          await this.runDelegateOnce(channelId, wsName, qKey, callback);
+        }
         } finally {
           markPoolIdle(wsName);
         }
@@ -1000,6 +1008,61 @@ export class MessageHandler {
         console.error(`[message-handler] Unknown routed message type: ${(routed as any).type}`);
         throw new Error(`Unknown routed message type: ${(routed as any).type}`);
     }
+  }
+
+  /**
+   * Run a single delegate check after a Copilot response and enqueue
+   * the next prompt if the goal is not yet achieved.
+   *
+   * The natural processQueue while-loop handles iteration: each enqueued
+   * delegate prompt goes through processOne → Copilot responds →
+   * delegate check again → loop continues or exits.
+   */
+  private async runDelegateOnce(
+    channelId: string,
+    wsName: string,
+    qKey: string,
+    callback: MessageCallback,
+  ): Promise<void> {
+    const maxIterations = config.delegateMaxIterations;
+    const iterCount = delegateStore.incrementIteration(qKey);
+    if (iterCount > maxIterations) {
+      console.warn(`[delegate] Max iterations (${maxIterations}) reached for ws=${wsName}`);
+      callback("⚠️ Delegate: 已达到最大循环次数，已退出委托模式。", true, { source: "delegate" });
+      delegateStore.exit(qKey);
+      return;
+    }
+
+    const goal = delegateStore.getGoal(qKey);
+    if (!goal) return; // delegate exited externally
+
+    const conversation = getRecentConversation(6); // last ~3 user+AI rounds
+    const output = await delegateCheck(goal, conversation);
+    const lines = output.split("\n");
+    const firstLine = lines[0]?.trim() ?? "";
+    const rest = lines.slice(1).join("\n").trim();
+
+    if (firstLine === "完成") {
+      console.log(`[delegate] Goal achieved for ws=${wsName}: ${rest || goal}`);
+      callback(output, true, { source: "delegate" });
+      delegateStore.exit(qKey);
+      return;
+    }
+
+    // "继续" — forward the rest as a prompt to Copilot
+    const promptText = rest || "请继续之前的目标。";
+    console.log(`[delegate] Enqueuing continue prompt for ws=${wsName}: ${promptText.slice(0, 120)}`);
+    callback(output, true, { source: "delegate-prompt" });
+
+    // Enqueue delegate's prompt — processQueue while-loop picks it up
+    const queue = this.channelQueues.get(qKey) ?? [];
+    queue.push({
+      routed: { type: "prompt", text: promptText, senderId: channelId },
+      callback,
+      resolve: () => {},
+      reject: (err: Error) => { console.error(`[delegate] Delegate prompt failed: ${err.message}`); },
+    });
+    this.channelQueues.set(qKey, queue);
   }
 
   private async handleWithRetry(

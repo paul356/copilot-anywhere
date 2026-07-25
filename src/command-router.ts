@@ -14,6 +14,9 @@ import { createWorkspace, deleteWorkspace, listWorkspaces, getWorkspace, setActi
 import { destroyAndInvalidateSession } from "./copilot-client.js";
 import { join } from "path";
 import { existsSync } from "fs";
+import { config } from "./config.js";
+import * as delegateStore from "./delegate-store.js";
+import { extractGoal } from "./delegate.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -119,6 +122,54 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
     }
   },
 
+  async delegate(args, ctx) {
+    const sub = args[0]?.toLowerCase();
+    const wsKey = `${ctx.channelKey}:${ctx.activeWorkspace}`;
+
+    // Not configured
+    if (!config.delegateEnabled) {
+      return { reply: "⚠️ Delegate 未配置。请设置 MAX_DELEGATE_MODEL、MAX_DELEGATE_API_KEY、MAX_DELEGATE_BASE_URL。" };
+    }
+
+    // /max:delegate end
+    if (sub === "end") {
+      if (!delegateStore.isActive(wsKey)) {
+        return { reply: "当前未处于委托模式。" };
+      }
+      delegateStore.exit(wsKey);
+      return { reply: "✅ 已退出委托模式。" };
+    }
+
+    // /max:delegate status
+    if (sub === "status") {
+      const st = delegateStore.getStatus(wsKey);
+      if (!st) return { reply: "⚪ 当前未处于委托模式。" };
+      return { reply: `🟢 委托模式激活中 — 目标：${st.goal}` };
+    }
+
+    // /max:delegate — extract goal from conversation history
+    if (sub === undefined || args.length === 0) {
+      // No goal text provided — extract from conversation history
+      // We import db here to avoid circular dependency at module level
+      const { getRecentUserMessages } = await import("./store/db.js");
+      const userMessages = getRecentUserMessages(10);
+      if (userMessages.length === 0) {
+        return { reply: "没有找到对话历史，无法提取目标。请用 /max:delegate goal <你的目标>" };
+      }
+      const goal = await extractGoal(userMessages);
+      delegateStore.enter(wsKey, goal);
+      return { reply: `✅ 已进入委托模式。\n目标：${goal}\n\n可随时用 /max:delegate goal <新目标> 更新目标，或用 /max:delegate end 退出。` };
+    }
+
+    // /max:delegate goal <goal text> — explicit goal, rest joined as text
+    const goal = args.slice(1).join(" ");
+    if (!goal) {
+      return { reply: "用法：/max:delegate goal <目标描述>" };
+    }
+    delegateStore.enter(wsKey, goal);
+    return { reply: `✅ 已进入委托模式。\n目标：${goal}\n\n可随时用 /max:delegate goal <新目标> 更新目标，或用 /max:delegate end 退出。` };
+  },
+
   async restart(_args, _ctx) {
     // Delay the actual restart so the reply can be sent to the user first.
     // Use the daemon's restartDaemon() (via dynamic import to avoid circular
@@ -144,6 +195,10 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
         "  /max:ws switch <name>        Switch workspace",
         "  /max:ws delete <name>        Delete workspace",
         "  /max:ws list                 List all workspaces",
+        "  /max:delegate                 Enter delegate mode (extract goal from history)",
+        "  /max:delegate goal <text>     Enter delegate mode with explicit goal",
+        "  /max:delegate end            Exit delegate mode",
+        "  /max:delegate status         Show delegate status",
         "  /max:restart                 Restart the daemon",
         "  /max:skip                    Skip the current question",
         "  /max:cancel                  Cancel queued messages, or in-flight if queue is empty",
@@ -190,8 +245,14 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
 
   async status(_args, ctx) {
     const wsList = listWorkspaces();
+    const wsKey = `${ctx.channelKey}:${ctx.activeWorkspace}`;
+    const delegateStatus = delegateStore.getStatus(wsKey);
+    const delegateLine = delegateStatus
+      ? `**Delegate:** 🟢 active → ${delegateStatus.goal}`
+      : "**Delegate:** ⚪ inactive";
     const lines: string[] = [
       `**Active workspace:** ${ctx.activeWorkspace}`,
+      delegateLine,
       `**Total workspaces:** ${wsList.length}`,
     ];
     return { reply: lines.join("\n") };

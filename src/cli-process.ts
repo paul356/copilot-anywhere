@@ -10,6 +10,21 @@ import * as pty from "node-pty";
 import { EventEmitter } from "events";
 import * as net from "net";
 
+// ── Environment sanitization ─────────────────────────────────────
+
+/** Variables that must NOT leak to the Copilot CLI subprocess. */
+const DELEGATE_VAR_PREFIXES = ["MAX_DELEGATE_"];
+
+function sanitizeEnv(env: Record<string, string | undefined>): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    const blocked = DELEGATE_VAR_PREFIXES.some((p) => key.startsWith(p));
+    if (!blocked) sanitized[key] = value;
+  }
+  return sanitized;
+}
+
 export interface CLIProcessOptions {
   port: number;
   model?: string;
@@ -49,7 +64,7 @@ export class CLIProcess extends EventEmitter {
       cols: 120,
       rows: 40,
       cwd: this.options.workingDirectory ?? process.cwd(),
-      env: { ...process.env, ...this.options.env },
+      env: sanitizeEnv({ ...process.env, ...this.options.env }),
     });
 
     this.proc.onData((data: string) => {

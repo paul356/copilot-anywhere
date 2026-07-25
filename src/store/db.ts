@@ -182,6 +182,16 @@ export function getRecentConversation(limit = 20): string {
   }).join("\n\n");
 }
 
+/** Get the most recent N user messages (role='user') for goal extraction. */
+export function getRecentUserMessages(limit = 10): string[] {
+  const db = getDb();
+  const rows = db.prepare(
+    `SELECT content FROM conversation_log WHERE role = 'user' ORDER BY id DESC LIMIT ?`
+  ).all(limit) as { content: string }[];
+  // Reverse so oldest is first (chronological)
+  return rows.map(r => r.content).reverse();
+}
+
 // ---------------------------------------------------------------------------
 // SQLite memory functions removed — wiki is the single source of truth.
 

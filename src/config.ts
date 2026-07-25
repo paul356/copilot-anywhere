@@ -18,6 +18,13 @@ const configSchema = z.object({
   FEISHU_AUTHORIZED_OPEN_ID: z.string().min(1).optional(),
   FEISHU_DOMAIN: z.enum(["feishu", "lark"]).optional(),
   COPILOT_UI_SERVER_PORT: z.string().optional(),
+  MAX_DELEGATE_MODEL: z.string().min(1).optional(),
+  MAX_DELEGATE_API_KEY: z.string().min(1).optional(),
+  MAX_DELEGATE_BASE_URL: z.string().min(1).optional(),
+  MAX_DELEGATE_PROVIDER_TYPE: z.string().min(1).optional(),
+  MAX_DELEGATE_PROMPT_LENGTH: z.string().optional(),
+  MAX_DELEGATE_MAX_ITERATIONS: z.string().optional(),
+  MAX_DELEGATE_VERBOSE: z.string().optional(),
 });
 
 const raw = configSchema.parse(process.env);
@@ -116,6 +123,35 @@ export const config = {
   get workspaceTagEnabled(): boolean {
     const v = process.env.WORKSPACE_TAG_ENABLED;
     return v === undefined ? true : v !== "0" && v.toLowerCase() !== "false";
+  },
+
+  // ── Delegate (attention proxy) config ─────────────────────────
+
+  get delegateModel(): string | undefined {
+    return raw.MAX_DELEGATE_MODEL;
+  },
+  get delegateApiKey(): string | undefined {
+    return raw.MAX_DELEGATE_API_KEY;
+  },
+  get delegateBaseUrl(): string | undefined {
+    return raw.MAX_DELEGATE_BASE_URL;
+  },
+  get delegateEnabled(): boolean {
+    return !!this.delegateModel && !!this.delegateApiKey && !!this.delegateBaseUrl;
+  },
+  get delegateProviderType(): string {
+    return raw.MAX_DELEGATE_PROVIDER_TYPE || "openai";
+  },
+  get delegatePromptLength(): number {
+    const v = raw.MAX_DELEGATE_PROMPT_LENGTH;
+    return v ? parseInt(v, 10) : 400;
+  },
+  get delegateMaxIterations(): number {
+    const v = raw.MAX_DELEGATE_MAX_ITERATIONS;
+    return v ? parseInt(v, 10) : 20;
+  },
+  get delegateVerbose(): boolean {
+    return raw.MAX_DELEGATE_VERBOSE === "true";
   },
 };
 
