@@ -45,6 +45,10 @@ export interface CommandResult {
   activeWorkspaceChanged?: string;
   /** If a workspace was created, its working directory */
   workspaceDirectory?: string;
+  /** If set, enqueue this as the first prompt — Copilot needs to know the goal. */
+  delegateStartPrompt?: string;
+  /** If true, only enqueue delegateStartPrompt when Copilot is idle. */
+  delegateStartOnlyIfIdle?: boolean;
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -158,7 +162,11 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
       }
       const goal = await extractGoal(userMessages);
       delegateStore.enter(wsKey, goal);
-      return { reply: `✅ 已进入委托模式。\n目标：${goal}\n\n可随时用 /max:delegate goal <新目标> 更新目标，或用 /max:delegate end 退出。` };
+      return {
+        reply: `✅ 已进入委托模式。\n目标：${goal}\n\n可随时用 /max:delegate goal <新目标> 更新目标，或用 /max:delegate end 退出。`,
+        delegateStartPrompt: goal,
+        delegateStartOnlyIfIdle: true,
+      };
     }
 
     // /max:delegate goal <goal text> — explicit goal, rest joined as text
@@ -167,7 +175,10 @@ const handlers: Record<string, (args: string[], ctx: CommandContext) => Promise<
       return { reply: "用法：/max:delegate goal <目标描述>" };
     }
     delegateStore.enter(wsKey, goal);
-    return { reply: `✅ 已进入委托模式。\n目标：${goal}\n\n可随时用 /max:delegate goal <新目标> 更新目标，或用 /max:delegate end 退出。` };
+    return {
+      reply: `✅ 已进入委托模式。\n目标：${goal}\n\n可随时用 /max:delegate goal <新目标> 更新目标，或用 /max:delegate end 退出。`,
+      delegateStartPrompt: goal,
+    };
   },
 
   async restart(_args, _ctx) {

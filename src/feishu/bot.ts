@@ -425,7 +425,17 @@ async function processMessage(
   await messageHandler.handle(routed, channelKey, (responseText: string, done: boolean) => {
     if (done) {
       if (earlySendTimer) { clearTimeout(earlySendTimer); earlySendTimer = undefined; }
-      if (responseText) latestContent = responseText; // capture max-command / cli-command one-shot result
+      if (responseText) {
+        latestContent = responseText;
+        // Send immediately — don't rely on the outer flush (which only runs once).
+        // This is critical for delegate-enqueued prompts whose callbacks fire
+        // after processMessage's outer scope has already returned.
+        const unsent = latestContent.slice(sentLength);
+        if (unsent) {
+          sendChunkedReply(messageId, chatId, unsent).catch(() => {});
+          sentLength = latestContent.length;
+        }
+      }
       return; // caller sends the remainder
     }
     if (!responseText) return;

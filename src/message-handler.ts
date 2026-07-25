@@ -591,6 +591,26 @@ export class MessageHandler {
       });
       console.log(`[message-handler] max-command result (${result.reply.length} chars): ${result.reply.slice(0, 120)}`);
       callback(result.reply, true);
+
+      // Enqueue first delegate prompt:
+      // - Explicit goal (/max:delegate goal <text>): always enqueue — Copilot doesn't know the goal yet.
+      // - Extracted goal (/max:delegate with no args): only enqueue if idle — user was already talking about it.
+      if (result.delegateStartPrompt) {
+        const qKey = wsKey(channelKey, wsName);
+        const canEnqueue = !result.delegateStartOnlyIfIdle || !this.isChannelBusy(channelKey, wsName);
+        if (canEnqueue) {
+          const queue = this.channelQueues.get(qKey) ?? [];
+          queue.push({
+            routed: { type: "prompt", text: result.delegateStartPrompt, senderId: channelKey },
+            callback,
+            resolve: () => {},
+            reject: (err: Error) => { console.error(`[delegate] First prompt failed: ${err.message}`); },
+          });
+          this.channelQueues.set(qKey, queue);
+          this.processQueue(qKey, channelKey, wsName);
+        }
+      }
+
       return;
     }
 
