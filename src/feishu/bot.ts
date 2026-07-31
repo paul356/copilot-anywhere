@@ -430,6 +430,10 @@ async function processMessage(
           sendChunkedReply(messageId, chatId, tagSource(responseText, meta?.source)).catch((err) => {
             console.error(`[feishu] Failed to send done response: ${err instanceof Error ? err.message : String(err)}`);
           });
+          // Mark everything as sent so the trailing flush is a no-op.
+          // Without this, sentLength stays 0 and the flush would re-send
+          // latestContent in full (causing the user to see every reply twice).
+          sentLength = latestContent.length;
         }
         return;
     }
